@@ -40,6 +40,15 @@ func (d *Document) SemanticTokens() ([]uint32, error) {
 			}
 		}
 	}
+	if d.Recovered() {
+		for _, span := range sourceCommentSpans(d.Source) {
+			position := d.positionAtOffset(span.start)
+			length := uint32(len(utf16.Encode([]rune(string(d.Source[span.start:span.end])))))
+			if length > 0 {
+				tokens = append(tokens, semanticToken{position.Line, position.Character, length, 6, uint32(span.start)})
+			}
+		}
+	}
 	sort.Slice(tokens, func(i, j int) bool {
 		if tokens[i].start == tokens[j].start {
 			return tokens[i].length > tokens[j].length
@@ -63,6 +72,34 @@ func (d *Document) SemanticTokens() ([]uint32, error) {
 		prevLine, prevChar = token.line, token.character
 	}
 	return data, nil
+}
+
+type sourceSpan struct{ start, end int }
+
+func sourceCommentSpans(source []byte) []sourceSpan {
+	var spans []sourceSpan
+	inString := byte(0)
+	for i := 0; i < len(source); i++ {
+		switch source[i] {
+		case '"', '\'':
+			if inString == 0 {
+				inString = source[i]
+			} else if inString == source[i] && (i == 0 || source[i-1] != '\\') {
+				inString = 0
+			}
+		case '#':
+			if inString != 0 {
+				continue
+			}
+			end := i
+			for end < len(source) && source[end] != '\n' {
+				end++
+			}
+			spans = append(spans, sourceSpan{i, end})
+			i = end - 1
+		}
+	}
+	return spans
 }
 
 func semanticKind(capture string) (uint32, bool) {

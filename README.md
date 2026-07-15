@@ -41,17 +41,27 @@ Build both commands with `go build ./cmd/bend-intel ./cmd/bendls`.
 go test ./...
 ```
 
-The embedded grammar was generated from `HigherOrderCO-archive/tree-sitter-bend` commit `7e7b88b77103e4d9c11a68d719be8702e4d6ad7f`. See `bendlang/grammar/UPSTREAM.md` for the reproducible update command and provenance.
+The vendored resolved grammar and embedded blob come from `HigherOrderCO-archive/tree-sitter-bend` commit `7e7b88b77103e4d9c11a68d719be8702e4d6ad7f`. See `bendlang/grammar/UPSTREAM.md` and `tools/generate-bend-grammar.sh` for the reproducible generation workflow. The C-runtime parity harness is opt-in with `-tags='cgo parity'`.
 
-## Roadmap
+## Delivered and next
 
-1. Grammar/scanner parity and incremental edit corpus.
-2. Syntax diagnostics, semantic tokens, symbols, folding, and selection ranges.
-3. Bend-aware scopes, definitions, references, rename, and workspace imports.
-4. LSP transport and contextual completion.
-5. Optional structured Bend compiler backend for types and semantic diagnostics.
+The initial substrate now covers grammar generation/scanner parity, incremental
+edits, queries, syntax diagnostics, semantic tokens, scopes, workspace imports,
+navigation, rename, contextual completion, and the LSP transport. The next
+upstream-facing work is to synchronize the grammar with current functional
+syntax and add a structured Bend compiler backend for inferred types and
+semantic diagnostics.
+
+This is the completion point for the initial two packages, not a claim that
+every phase of the broader proposal is finished. The archived grammar still
+has five documented current-example gaps, and compiler-backed types,
+pattern-coverage/HVM views, and parallel-structure visualizations remain
+follow-on work.
 
 The repository is transfer-ready, but M31 Labs can maintain it independently so Bend's maintainers do not inherit an obligation.
+
+Downstream parser-core findings and regression boundaries are recorded in
+[the gotreesitter findings note](docs/gotreesitter-findings.md).
 
 ## Original project charter
 
@@ -59,4 +69,4 @@ This implementation follows the referenced **Bend Language LSP Feasibility** spe
 
 ## Current compatibility
 
-The initial archived-grammar baseline parses 348 of 525 files in the current Bend repository without an error node. The 177 failures are tracked as compatibility work, not hidden behind permissive recovery. See [the compatibility snapshot](docs/compatibility.md).
+The initial archived-grammar baseline parses 348 of 525 files in the current Bend repository without an error node. The syntax-first recovery view produces a useful structural outline for all 16 current examples and a diagnostics-free structural tree for 11; the remaining five examples are explicit functional-syntax compatibility gaps, not hidden behind permissive recovery. See [the compatibility snapshot](docs/compatibility.md) and reproduce it with `go run ./cmd/bend-corpus-report -path /path/to/Bend/examples`.

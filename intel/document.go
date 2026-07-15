@@ -1,7 +1,9 @@
 package intel
 
 import (
+	"bytes"
 	"fmt"
+	"sort"
 	"unicode/utf16"
 	"unicode/utf8"
 
@@ -32,11 +34,24 @@ type FoldingRange struct {
 	StartLine uint32 `json:"startLine"`
 	EndLine   uint32 `json:"endLine"`
 }
+type SelectionRange struct {
+	Range  Range           `json:"range"`
+	Parent *SelectionRange `json:"parent,omitempty"`
+}
 
 type Document struct {
-	Source   []byte
-	Tree     *gotreesitter.Tree
-	language *gotreesitter.Language
+	Source     []byte
+	Tree       *gotreesitter.Tree
+	language   *gotreesitter.Language
+	treeSource []byte
+	scopeGraph *ScopeGraph
+}
+
+// Recovered reports whether the structural tree was parsed from a
+// range-preserving recovery view rather than the exact source bytes. The
+// original source remains in Source and must be used for all editor ranges.
+func (d *Document) Recovered() bool {
+	return !bytes.Equal(d.Source, d.treeSource)
 }
 
 // Offset converts an LSP UTF-16 position to a UTF-8 byte offset.
@@ -90,6 +105,9 @@ func (d *Document) Definition(position Position) *Symbol {
 		return nil
 	}
 	name := node.Text(d.Source)
+	if binding := d.Scopes().bindingAt(node, name); binding != nil {
+		return &Symbol{Name: binding.Name, Kind: binding.Kind, Range: binding.Range}
+	}
 	for _, symbol := range d.Symbols() {
 		if symbol.Name == name {
 			copy := symbol
@@ -111,12 +129,38 @@ func (d *Document) References(position Position) []Range {
 		return nil
 	}
 	name := node.Text(d.Source)
+	target := d.Scopes().bindingAt(node, name)
 	var out []Range
 	walk(d.Tree.RootNode(), func(candidate *gotreesitter.Node) {
-		if candidate.Type(d.language) == "identifier" && candidate.Text(d.Source) == name {
+		if candidate.Type(d.language) == "identifier" && candidate.Text(d.Source) == name && (target == nil || sameBinding(target, d.Scopes().bindingAt(candidate, name))) {
 			out = append(out, nodeRange(candidate))
 		}
 	})
+	return out
+}
+
+func sameBinding(a, b *Binding) bool {
+	return a != nil && b != nil && a.Name == b.Name && a.Kind == b.Kind && a.ScopeID == b.ScopeID && a.Range == b.Range
+}
+
+func (d *Document) SelectionRanges(positions []Position) []SelectionRange {
+	out := make([]SelectionRange, 0, len(positions))
+	for _, position := range positions {
+		node := d.NodeAt(position)
+		if node == nil {
+			out = append(out, SelectionRange{})
+			continue
+		}
+		var chain *SelectionRange
+		for current := node; current != nil; current = current.Parent() {
+			chain = &SelectionRange{Range: nodeRange(current), Parent: chain}
+		}
+		var ordered *SelectionRange
+		for current := chain; current != nil; current = current.Parent {
+			ordered = &SelectionRange{Range: current.Range, Parent: ordered}
+		}
+		out = append(out, *ordered)
+	}
 	return out
 }
 
@@ -152,17 +196,42 @@ func Parse(source []byte) (*Document, error) {
 	if err != nil {
 		return nil, err
 	}
-	tree, err := parser.Parse(source)
+	tree, treeSource, err := parseWithRecovery(parser, lang, source)
 	if err != nil {
 		return nil, fmt.Errorf("parse Bend: %w", err)
 	}
-	return &Document{Source: append([]byte(nil), source...), Tree: tree, language: lang}, nil
+	return &Document{Source: append([]byte(nil), source...), Tree: tree, language: lang, treeSource: treeSource}, nil
 }
 
 func (d *Document) Diagnostics() []Diagnostic {
-	var out []Diagnostic
+	out := make([]Diagnostic, 0)
 	collectInnermostErrors(d.Tree.RootNode(), &out)
+	seenLines := make(map[uint32]bool, len(out))
+	for _, diagnostic := range out {
+		seenLines[diagnostic.Range.Start.Line] = true
+	}
+	for _, line := range missingDefinitionLines(d.Source, d.Tree.RootNode(), d.language) {
+		if seenLines[line] {
+			continue
+		}
+		start, end := lineBounds(d.Source, line)
+		out = append(out, Diagnostic{Message: "Bend definition is outside the current grammar baseline", Range: Range{Start: Position{Line: line}, End: Position{Line: line, Character: uint32(end - start)}}, Severity: 2, Source: "bend-syntax"})
+	}
 	return out
+}
+
+func lineBounds(source []byte, line uint32) (int, int) {
+	start := 0
+	for current := uint32(0); current < line && start < len(source); start++ {
+		if source[start] == '\n' {
+			current++
+		}
+	}
+	end := start
+	for end < len(source) && source[end] != '\n' {
+		end++
+	}
+	return start, end
 }
 
 // collectInnermostErrors suppresses the nested ERROR wrappers produced during
@@ -197,6 +266,13 @@ func (d *Document) Symbols() []Symbol {
 			return
 		}
 		out = append(out, Symbol{Name: name.Text(d.Source), Kind: kind, Range: nodeRange(n)})
+	})
+	out = append(out, lexicalSymbols(d.Source, out)...)
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Range.Start.Line == out[j].Range.Start.Line {
+			return out[i].Range.Start.Character < out[j].Range.Start.Character
+		}
+		return out[i].Range.Start.Line < out[j].Range.Start.Line
 	})
 	return out
 }

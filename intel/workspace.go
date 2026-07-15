@@ -43,13 +43,21 @@ func (d *Document) Imports() []Import {
 // Workspace is the editor-independent project index. It only owns syntax
 // facts; Bend's compiler remains responsible for package/type semantics.
 type Workspace struct {
-	Root      string
-	Documents map[string]*Document
+	Root        string
+	Documents   map[string]*Document
+	ImportGraph ImportGraph
+}
+
+// ImportGraph records only paths resolved to indexed documents. The syntax
+// layer still exposes unresolved imports through Document.Imports.
+type ImportGraph struct {
+	Edges   map[string][]string
+	Reverse map[string][]string
 }
 
 func NewWorkspace(root string) *Workspace {
 	abs, _ := filepath.Abs(root)
-	return &Workspace{Root: abs, Documents: map[string]*Document{}}
+	return &Workspace{Root: abs, Documents: map[string]*Document{}, ImportGraph: ImportGraph{Edges: map[string][]string{}, Reverse: map[string][]string{}}}
 }
 
 func (w *Workspace) Add(uri string, source []byte) error {
@@ -58,15 +66,30 @@ func (w *Workspace) Add(uri string, source []byte) error {
 		return err
 	}
 	w.Documents[uri] = doc
+	w.rebuildImportGraph()
 	return nil
 }
 
-func (w *Workspace) Remove(uri string) { delete(w.Documents, uri) }
+func (w *Workspace) Remove(uri string) {
+	delete(w.Documents, uri)
+	w.rebuildImportGraph()
+}
+
+// SetDocument replaces an open document and refreshes import edges. Editors
+// use this after an incremental edit because the import set can itself change.
+func (w *Workspace) SetDocument(uri string, doc *Document) {
+	if doc == nil {
+		w.Remove(uri)
+		return
+	}
+	w.Documents[uri] = doc
+	w.rebuildImportGraph()
+}
 
 // Load discovers .bend files below Root. It is cancellation-aware between
 // files so editors can abandon a stale workspace scan.
 func (w *Workspace) Load(ctx context.Context) error {
-	return filepath.WalkDir(w.Root, func(path string, entry os.DirEntry, err error) error {
+	err := filepath.WalkDir(w.Root, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -89,6 +112,8 @@ func (w *Workspace) Load(ctx context.Context) error {
 		uri := pathToURI(path)
 		return w.Add(uri, source)
 	})
+	w.rebuildImportGraph()
+	return err
 }
 
 type WorkspaceSymbol struct {
@@ -118,6 +143,23 @@ func (w *Workspace) Definition(uri string, position Position) *WorkspaceSymbol {
 		return nil
 	}
 	local := doc.Definition(position)
+	if node := identifierAt(doc, position); node != nil {
+		name := node.Text(doc.Source)
+		if binding := doc.Scopes().bindingAt(node, name); binding != nil && binding.ScopeID != 0 {
+			if local == nil {
+				local = &Symbol{Name: binding.Name, Kind: binding.Kind, Range: binding.Range}
+			}
+			return &WorkspaceSymbol{URI: uri, Symbol: *local}
+		}
+		if local != nil && local.Name == name {
+			return &WorkspaceSymbol{URI: uri, Symbol: *local}
+		}
+		for candidateURI := range w.relatedDocuments(uri) {
+			if symbol := w.symbol(candidateURI, name); symbol != nil {
+				return &WorkspaceSymbol{URI: candidateURI, Symbol: *symbol}
+			}
+		}
+	}
 	if local == nil {
 		return nil
 	}
@@ -135,21 +177,23 @@ func (w *Workspace) References(uri string, position Position) []WorkspaceLocatio
 	if doc == nil {
 		return nil
 	}
-	node := doc.NodeAt(position)
-	if node == nil {
-		return nil
-	}
-	for node != nil && node.Type(doc.language) != "identifier" {
-		node = node.Parent()
-	}
+	node := identifierAt(doc, position)
 	if node == nil {
 		return nil
 	}
 	name := node.Text(doc.Source)
+	target := doc.Scopes().bindingAt(node, name)
+	related := w.relatedDocuments(w.targetURI(uri, name, target))
 	var out []WorkspaceLocation
 	for candidateURI, candidateDoc := range w.Documents {
+		if !w.candidateDocumentAllowed(candidateURI, uri, target, related) {
+			continue
+		}
 		walk(candidateDoc.Tree.RootNode(), func(candidate *gotreesitter.Node) {
-			if candidate.Type(candidateDoc.language) == "identifier" && candidate.Text(candidateDoc.Source) == name {
+			if candidate.Type(candidateDoc.language) != "identifier" || candidate.Text(candidateDoc.Source) != name {
+				return
+			}
+			if w.candidateMatches(candidateURI, uri, candidateDoc.Scopes().bindingAt(candidate, name), target, name) {
 				out = append(out, WorkspaceLocation{URI: candidateURI, Range: nodeRange(candidate)})
 			}
 		})
@@ -186,7 +230,18 @@ func (w *Workspace) Completions(uri string, position Position) []Completion {
 		seen[keyword] = true
 		out = append(out, Completion{Label: keyword, Kind: 14, Detail: "Bend keyword"})
 	}
+	for _, binding := range doc.Scopes().Bindings {
+		if binding.ScopeID == 0 || seen[binding.Name] {
+			continue
+		}
+		seen[binding.Name] = true
+		out = append(out, Completion{Label: binding.Name, Kind: 6, Detail: binding.Kind})
+	}
+	related := w.relatedDocuments(uri)
 	for _, symbol := range w.Symbols() {
+		if !related[symbol.URI] {
+			continue
+		}
 		if seen[symbol.Name] {
 			continue
 		}
@@ -211,21 +266,23 @@ func (w *Workspace) Rename(uri string, position Position, newName string) ([]Tex
 	if doc == nil {
 		return nil, fmt.Errorf("document not found: %s", uri)
 	}
-	node := doc.NodeAt(position)
-	if node == nil {
-		return nil, fmt.Errorf("no identifier at position")
-	}
-	for node != nil && node.Type(doc.language) != "identifier" {
-		node = node.Parent()
-	}
+	node := identifierAt(doc, position)
 	if node == nil {
 		return nil, fmt.Errorf("no identifier at position")
 	}
 	oldName := node.Text(doc.Source)
+	target := doc.Scopes().bindingAt(node, oldName)
+	related := w.relatedDocuments(w.targetURI(uri, oldName, target))
 	var out []TextEdit
 	for candidateURI, candidateDoc := range w.Documents {
+		if !w.candidateDocumentAllowed(candidateURI, uri, target, related) {
+			continue
+		}
 		walk(candidateDoc.Tree.RootNode(), func(candidate *gotreesitter.Node) {
-			if candidate.Type(candidateDoc.language) == "identifier" && candidate.Text(candidateDoc.Source) == oldName {
+			if candidate.Type(candidateDoc.language) != "identifier" || candidate.Text(candidateDoc.Source) != oldName {
+				return
+			}
+			if w.candidateMatches(candidateURI, uri, candidateDoc.Scopes().bindingAt(candidate, oldName), target, oldName) {
 				out = append(out, TextEdit{URI: candidateURI, Range: nodeRange(candidate), NewText: newName})
 			}
 		})
@@ -234,6 +291,108 @@ func (w *Workspace) Rename(uri string, position Position, newName string) ([]Tex
 }
 
 func pathToURI(path string) string { return "file://" + filepath.ToSlash(path) }
+
+func identifierAt(doc *Document, position Position) *gotreesitter.Node {
+	node := doc.NodeAt(position)
+	for node != nil && node.Type(doc.language) != "identifier" {
+		node = node.Parent()
+	}
+	return node
+}
+
+func (w *Workspace) targetURI(uri, name string, target *Binding) string {
+	if target != nil || w.symbol(uri, name) != nil {
+		return uri
+	}
+	for candidateURI := range w.relatedDocuments(uri) {
+		if w.symbol(candidateURI, name) != nil {
+			return candidateURI
+		}
+	}
+	return uri
+}
+
+func (w *Workspace) candidateDocumentAllowed(candidateURI, requestURI string, target *Binding, related map[string]bool) bool {
+	if target != nil && target.ScopeID != 0 {
+		return candidateURI == requestURI
+	}
+	return related[candidateURI]
+}
+
+func (w *Workspace) candidateMatches(candidateURI, requestURI string, candidate, target *Binding, name string) bool {
+	if target != nil && target.ScopeID != 0 {
+		return candidateURI == requestURI && sameBinding(target, candidate)
+	}
+	return candidate == nil || candidate.ScopeID == 0 && candidate.Name == name
+}
+
+func (w *Workspace) symbol(uri, name string) *Symbol {
+	doc := w.Documents[uri]
+	if doc == nil {
+		return nil
+	}
+	for _, symbol := range doc.Symbols() {
+		if symbol.Name == name {
+			copy := symbol
+			return &copy
+		}
+	}
+	return nil
+}
+
+func (w *Workspace) rebuildImportGraph() {
+	graph := ImportGraph{Edges: map[string][]string{}, Reverse: map[string][]string{}}
+	for uri, doc := range w.Documents {
+		for _, imp := range doc.Imports() {
+			if target, ok := w.resolveImport(uri, imp.Path); ok {
+				graph.Edges[uri] = append(graph.Edges[uri], target)
+				graph.Reverse[target] = append(graph.Reverse[target], uri)
+			}
+		}
+	}
+	for uri := range graph.Edges {
+		sort.Strings(graph.Edges[uri])
+	}
+	for uri := range graph.Reverse {
+		sort.Strings(graph.Reverse[uri])
+	}
+	w.ImportGraph = graph
+}
+
+func (w *Workspace) resolveImport(fromURI, importPath string) (string, bool) {
+	path := strings.Trim(strings.TrimSpace(importPath), "\"'")
+	if path == "" {
+		return "", false
+	}
+	from := PathFromURI(fromURI)
+	var candidates []string
+	if filepath.IsAbs(from) {
+		candidates = append(candidates, filepath.Join(filepath.Dir(from), filepath.FromSlash(path)))
+	}
+	if w.Root != "" {
+		candidates = append(candidates, filepath.Join(w.Root, filepath.FromSlash(path)))
+	}
+	for _, candidate := range candidates {
+		for _, variant := range []string{candidate, candidate + ".bend", filepath.Join(candidate, "main.bend")} {
+			uri := pathToURI(filepath.Clean(variant))
+			if _, ok := w.Documents[uri]; ok {
+				return uri, true
+			}
+		}
+	}
+	return "", false
+}
+
+func (w *Workspace) relatedDocuments(uri string) map[string]bool {
+	related := map[string]bool{uri: true}
+	for _, target := range w.ImportGraph.Edges[uri] {
+		related[target] = true
+	}
+	for _, source := range w.ImportGraph.Reverse[uri] {
+		related[source] = true
+	}
+	return related
+}
 
 // PathFromURI converts a file URI received from an editor into an OS path.
 func PathFromURI(uri string) string {

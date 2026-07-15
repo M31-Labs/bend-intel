@@ -26,18 +26,25 @@ type rpcError struct {
 }
 
 type Server struct {
-	in        *bufio.Reader
-	out       io.Writer
-	mu        sync.Mutex
-	documents map[string]*intel.Document
-	versions  map[string]int32
-	shutdown  bool
-	workspace *intel.Workspace
+	in             *bufio.Reader
+	out            io.Writer
+	mu             sync.Mutex
+	documents      map[string]*intel.Document
+	versions       map[string]int32
+	shutdown       bool
+	workspace      *intel.Workspace
+	backend        intel.SemanticBackend
+	semanticMu     sync.Mutex
+	semanticCancel map[string]context.CancelFunc
 }
 
 func New(in io.Reader, out io.Writer) *Server {
-	return &Server{in: bufio.NewReader(in), out: out, documents: map[string]*intel.Document{}, versions: map[string]int32{}, workspace: intel.NewWorkspace("")}
+	return &Server{in: bufio.NewReader(in), out: out, documents: map[string]*intel.Document{}, versions: map[string]int32{}, workspace: intel.NewWorkspace(""), semanticCancel: map[string]context.CancelFunc{}}
 }
+
+// SetSemanticBackend installs an optional compiler-backed semantic provider.
+// A nil backend keeps the syntax-first server compiler-independent.
+func (s *Server) SetSemanticBackend(backend intel.SemanticBackend) { s.backend = backend }
 
 func (s *Server) Run() error {
 	for {
@@ -70,14 +77,16 @@ func (s *Server) handle(msg message) error {
 			s.workspace = intel.NewWorkspace(intel.PathFromURI(initParams.RootURI))
 			_ = s.workspace.Load(context.Background())
 		}
-		capabilities := map[string]any{"positionEncoding": "utf-16", "textDocumentSync": map[string]any{"openClose": true, "change": 2}, "documentSymbolProvider": true, "foldingRangeProvider": true, "hoverProvider": true, "definitionProvider": true, "referencesProvider": true, "semanticTokensProvider": map[string]any{"legend": map[string]any{"tokenTypes": intel.SemanticTokenTypes, "tokenModifiers": []string{}}, "full": true}}
+		capabilities := map[string]any{"positionEncoding": "utf-16", "textDocumentSync": map[string]any{"openClose": true, "change": 2}, "documentSymbolProvider": true, "foldingRangeProvider": true, "selectionRangeProvider": true, "hoverProvider": true, "definitionProvider": true, "referencesProvider": true, "completionProvider": map[string]any{"triggerCharacters": []string{"/", ".", " "}}, "semanticTokensProvider": map[string]any{"legend": map[string]any{"tokenTypes": intel.SemanticTokenTypes, "tokenModifiers": []string{}}, "full": true}}
 		return s.reply(msg.ID, map[string]any{"capabilities": capabilities, "serverInfo": map[string]string{"name": "bendls", "version": "0.1.0"}}, nil)
 	case "initialized":
 		return nil
 	case "shutdown":
+		s.cancelSemanticWork()
 		s.shutdown = true
 		return s.reply(msg.ID, nil, nil)
 	case "exit":
+		s.cancelSemanticWork()
 		return io.EOF
 	case "textDocument/didOpen":
 		return s.didOpen(msg.Params)
@@ -99,23 +108,29 @@ func (s *Server) handle(msg message) error {
 		})
 	case "textDocument/definition":
 		return s.positionRequest(msg, func(uri string, d *intel.Document, p intel.Position) any {
-			def := d.Definition(p)
+			def := s.workspace.Definition(uri, p)
 			if def == nil {
 				return nil
 			}
-			return map[string]any{"uri": uri, "range": def.Range}
+			return map[string]any{"uri": def.URI, "range": def.Range}
 		})
 	case "textDocument/references":
 		return s.positionRequest(msg, func(uri string, d *intel.Document, p intel.Position) any {
-			refs := d.References(p)
+			refs := s.workspace.References(uri, p)
 			out := make([]any, 0, len(refs))
 			for _, r := range refs {
-				out = append(out, map[string]any{"uri": uri, "range": r})
+				out = append(out, map[string]any{"uri": r.URI, "range": r.Range})
 			}
 			return out
 		})
 	case "workspace/symbol":
-		return s.reply(msg.ID, s.workspaceSymbols(), nil)
+		var params struct {
+			Query string `json:"query"`
+		}
+		if err := json.Unmarshal(msg.Params, &params); err != nil {
+			return err
+		}
+		return s.reply(msg.ID, s.workspaceSymbols(params.Query), nil)
 	case "textDocument/completion":
 		return s.positionRequest(msg, func(uri string, _ *intel.Document, position intel.Position) any {
 			return map[string]any{"isIncomplete": false, "items": s.workspace.Completions(uri, position)}
@@ -130,6 +145,8 @@ func (s *Server) handle(msg message) error {
 			}
 			return map[string]any{"data": data}
 		})
+	case "textDocument/selectionRange":
+		return s.selectionRanges(msg)
 	default:
 		if len(msg.ID) > 0 {
 			return s.reply(msg.ID, nil, &rpcError{-32601, "method not found: " + msg.Method})
@@ -155,8 +172,14 @@ func (s *Server) didOpen(raw json.RawMessage) error {
 	}
 	s.documents[p.TextDocument.URI] = d
 	_ = s.workspace.Add(p.TextDocument.URI, []byte(p.TextDocument.Text))
+	s.semanticMu.Lock()
 	s.versions[p.TextDocument.URI] = p.TextDocument.Version
-	return s.publish(p.TextDocument.URI, d)
+	s.semanticMu.Unlock()
+	if err := s.publish(p.TextDocument.URI, d); err != nil {
+		return err
+	}
+	s.scheduleSemantic(p.TextDocument.URI)
+	return nil
 }
 
 func (s *Server) didChange(raw json.RawMessage) error {
@@ -184,9 +207,15 @@ func (s *Server) didChange(raw json.RawMessage) error {
 	if err := d.ApplyChanges(changes); err != nil {
 		return err
 	}
-	s.workspace.Documents[p.TextDocument.URI] = d
+	s.workspace.SetDocument(p.TextDocument.URI, d)
+	s.semanticMu.Lock()
 	s.versions[p.TextDocument.URI] = p.TextDocument.Version
-	return s.publish(p.TextDocument.URI, d)
+	s.semanticMu.Unlock()
+	if err := s.publish(p.TextDocument.URI, d); err != nil {
+		return err
+	}
+	s.scheduleSemantic(p.TextDocument.URI)
+	return nil
 }
 
 func (s *Server) didClose(raw json.RawMessage) error {
@@ -199,12 +228,69 @@ func (s *Server) didClose(raw json.RawMessage) error {
 		return err
 	}
 	delete(s.documents, p.TextDocument.URI)
-	delete(s.versions, p.TextDocument.URI)
 	s.workspace.Remove(p.TextDocument.URI)
+	s.semanticMu.Lock()
+	delete(s.versions, p.TextDocument.URI)
+	if cancel := s.semanticCancel[p.TextDocument.URI]; cancel != nil {
+		cancel()
+	}
+	delete(s.semanticCancel, p.TextDocument.URI)
+	s.semanticMu.Unlock()
 	return s.notify("textDocument/publishDiagnostics", map[string]any{"uri": p.TextDocument.URI, "diagnostics": []any{}})
 }
+
+func (s *Server) cancelSemanticWork() {
+	s.semanticMu.Lock()
+	defer s.semanticMu.Unlock()
+	for uri, cancel := range s.semanticCancel {
+		cancel()
+		delete(s.semanticCancel, uri)
+	}
+}
+
 func (s *Server) publish(uri string, d *intel.Document) error {
-	return s.notify("textDocument/publishDiagnostics", map[string]any{"uri": uri, "version": s.versions[uri], "diagnostics": d.Diagnostics()})
+	return s.publishDiagnostics(uri, s.versions[uri], d.Diagnostics())
+}
+
+func (s *Server) publishDiagnostics(uri string, version int32, diagnostics []intel.Diagnostic) error {
+	return s.notify("textDocument/publishDiagnostics", map[string]any{"uri": uri, "version": version, "diagnostics": diagnostics})
+}
+
+func (s *Server) scheduleSemantic(uri string) {
+	if s.backend == nil {
+		return
+	}
+	s.semanticMu.Lock()
+	if cancel := s.semanticCancel[uri]; cancel != nil {
+		cancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.semanticCancel[uri] = cancel
+	version := s.versions[uri]
+	snapshot := intel.WorkspaceSnapshot{Root: s.workspace.Root, Documents: map[string]intel.DocumentSnapshot{}}
+	for candidateURI, doc := range s.documents {
+		snapshot.Documents[candidateURI] = intel.DocumentSnapshot{URI: candidateURI, Version: s.versions[candidateURI], Source: append([]byte(nil), doc.Source...)}
+	}
+	backend := s.backend
+	s.semanticMu.Unlock()
+	go func() {
+		result, err := backend.Check(ctx, snapshot, uri)
+		if err != nil || result == nil || ctx.Err() != nil {
+			return
+		}
+		s.semanticMu.Lock()
+		currentVersion, open := s.versions[uri]
+		s.semanticMu.Unlock()
+		if !open || currentVersion != version {
+			return
+		}
+		for i := range result.Diagnostics {
+			if result.Diagnostics[i].Source == "" {
+				result.Diagnostics[i].Source = "bend-compiler"
+			}
+		}
+		_ = s.publishDiagnostics(uri, version, result.Diagnostics)
+	}()
 }
 
 func (s *Server) documentSymbols(msg message) error {
@@ -219,12 +305,32 @@ func (s *Server) documentSymbols(msg message) error {
 	})
 }
 
-func (s *Server) workspaceSymbols() []any {
+func (s *Server) workspaceSymbols(query string) []any {
 	out := make([]any, 0)
 	for _, symbol := range s.workspace.Symbols() {
+		if query != "" && !strings.Contains(strings.ToLower(symbol.Name), strings.ToLower(query)) {
+			continue
+		}
 		out = append(out, map[string]any{"name": symbol.Name, "kind": symbolKind(symbol.Kind), "location": map[string]any{"uri": symbol.URI, "range": symbol.Range}})
 	}
 	return out
+}
+
+func (s *Server) selectionRanges(msg message) error {
+	var params struct {
+		TextDocument struct {
+			URI string `json:"uri"`
+		} `json:"textDocument"`
+		Positions []intel.Position `json:"positions"`
+	}
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		return err
+	}
+	doc := s.documents[params.TextDocument.URI]
+	if doc == nil {
+		return s.reply(msg.ID, []any{}, nil)
+	}
+	return s.reply(msg.ID, doc.SelectionRanges(params.Positions), nil)
 }
 
 func symbolKind(kind string) int {
