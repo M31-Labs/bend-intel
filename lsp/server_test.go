@@ -64,6 +64,24 @@ func TestShutdownReturnsNullResultAndExitStops(t *testing.T) {
 	}
 }
 
+func TestWorkspaceSymbolsCompletionAndRename(t *testing.T) {
+	input := bytes.NewBuffer(nil)
+	writeFrame(t, input, map[string]any{"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": map[string]any{"textDocument": map[string]any{"uri": "file:///main.bend", "version": 1, "text": "def main():\n  return add(1, 2)\n"}}})
+	writeFrame(t, input, map[string]any{"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": map[string]any{"textDocument": map[string]any{"uri": "file:///defs.bend", "version": 1, "text": "def add(x, y):\n  return x + y\n"}}})
+	writeFrame(t, input, map[string]any{"jsonrpc": "2.0", "id": 4, "method": "workspace/symbol", "params": map[string]any{"query": "add"}})
+	writeFrame(t, input, map[string]any{"jsonrpc": "2.0", "id": 5, "method": "textDocument/completion", "params": map[string]any{"textDocument": map[string]any{"uri": "file:///main.bend"}, "position": map[string]any{"line": 1, "character": 9}}})
+	writeFrame(t, input, map[string]any{"jsonrpc": "2.0", "id": 6, "method": "textDocument/rename", "params": map[string]any{"textDocument": map[string]any{"uri": "file:///main.bend"}, "position": map[string]any{"line": 1, "character": 9}, "newName": "sum"}})
+	output := bytes.NewBuffer(nil)
+	if err := New(input, output).Run(); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"location"`, `"label":"add"`, `"changes"`, `"newText":"sum"`} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("workspace output missing %s:\n%s", want, output.String())
+		}
+	}
+}
+
 func writeFrame(t *testing.T, buffer *bytes.Buffer, value any) {
 	t.Helper()
 	body, err := json.Marshal(value)

@@ -2,6 +2,7 @@ package lsp
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -31,10 +32,11 @@ type Server struct {
 	documents map[string]*intel.Document
 	versions  map[string]int32
 	shutdown  bool
+	workspace *intel.Workspace
 }
 
 func New(in io.Reader, out io.Writer) *Server {
-	return &Server{in: bufio.NewReader(in), out: out, documents: map[string]*intel.Document{}, versions: map[string]int32{}}
+	return &Server{in: bufio.NewReader(in), out: out, documents: map[string]*intel.Document{}, versions: map[string]int32{}, workspace: intel.NewWorkspace("")}
 }
 
 func (s *Server) Run() error {
@@ -60,6 +62,14 @@ func (s *Server) Run() error {
 func (s *Server) handle(msg message) error {
 	switch msg.Method {
 	case "initialize":
+		var initParams struct {
+			RootURI string `json:"rootUri"`
+		}
+		_ = json.Unmarshal(msg.Params, &initParams)
+		if initParams.RootURI != "" {
+			s.workspace = intel.NewWorkspace(intel.PathFromURI(initParams.RootURI))
+			_ = s.workspace.Load(context.Background())
+		}
 		capabilities := map[string]any{"positionEncoding": "utf-16", "textDocumentSync": map[string]any{"openClose": true, "change": 2}, "documentSymbolProvider": true, "foldingRangeProvider": true, "hoverProvider": true, "definitionProvider": true, "referencesProvider": true, "semanticTokensProvider": map[string]any{"legend": map[string]any{"tokenTypes": intel.SemanticTokenTypes, "tokenModifiers": []string{}}, "full": true}}
 		return s.reply(msg.ID, map[string]any{"capabilities": capabilities, "serverInfo": map[string]string{"name": "bendls", "version": "0.1.0"}}, nil)
 	case "initialized":
@@ -104,6 +114,14 @@ func (s *Server) handle(msg message) error {
 			}
 			return out
 		})
+	case "workspace/symbol":
+		return s.reply(msg.ID, s.workspaceSymbols(), nil)
+	case "textDocument/completion":
+		return s.positionRequest(msg, func(uri string, _ *intel.Document, position intel.Position) any {
+			return map[string]any{"isIncomplete": false, "items": s.workspace.Completions(uri, position)}
+		})
+	case "textDocument/rename":
+		return s.rename(msg)
 	case "textDocument/semanticTokens/full":
 		return s.withDocument(msg, func(_ string, d *intel.Document) any {
 			data, err := d.SemanticTokens()
@@ -136,6 +154,7 @@ func (s *Server) didOpen(raw json.RawMessage) error {
 		return err
 	}
 	s.documents[p.TextDocument.URI] = d
+	_ = s.workspace.Add(p.TextDocument.URI, []byte(p.TextDocument.Text))
 	s.versions[p.TextDocument.URI] = p.TextDocument.Version
 	return s.publish(p.TextDocument.URI, d)
 }
@@ -165,6 +184,7 @@ func (s *Server) didChange(raw json.RawMessage) error {
 	if err := d.ApplyChanges(changes); err != nil {
 		return err
 	}
+	s.workspace.Documents[p.TextDocument.URI] = d
 	s.versions[p.TextDocument.URI] = p.TextDocument.Version
 	return s.publish(p.TextDocument.URI, d)
 }
@@ -180,6 +200,7 @@ func (s *Server) didClose(raw json.RawMessage) error {
 	}
 	delete(s.documents, p.TextDocument.URI)
 	delete(s.versions, p.TextDocument.URI)
+	s.workspace.Remove(p.TextDocument.URI)
 	return s.notify("textDocument/publishDiagnostics", map[string]any{"uri": p.TextDocument.URI, "diagnostics": []any{}})
 }
 func (s *Server) publish(uri string, d *intel.Document) error {
@@ -196,6 +217,49 @@ func (s *Server) documentSymbols(msg message) error {
 		}
 		return out
 	})
+}
+
+func (s *Server) workspaceSymbols() []any {
+	out := make([]any, 0)
+	for _, symbol := range s.workspace.Symbols() {
+		out = append(out, map[string]any{"name": symbol.Name, "kind": symbolKind(symbol.Kind), "location": map[string]any{"uri": symbol.URI, "range": symbol.Range}})
+	}
+	return out
+}
+
+func symbolKind(kind string) int {
+	switch kind {
+	case "function":
+		return 12
+	case "type":
+		return 23
+	case "object":
+		return 5
+	default:
+		return 13
+	}
+}
+
+func (s *Server) rename(msg message) error {
+	var params struct {
+		TextDocument struct {
+			URI string `json:"uri"`
+		} `json:"textDocument"`
+		Position intel.Position `json:"position"`
+		NewName  string         `json:"newName"`
+	}
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		return err
+	}
+	edits, err := s.workspace.Rename(params.TextDocument.URI, params.Position, params.NewName)
+	if err != nil {
+		return s.reply(msg.ID, nil, &rpcError{-32602, err.Error()})
+	}
+	changes := map[string][]map[string]any{}
+	for _, edit := range edits {
+		changes[edit.URI] = append(changes[edit.URI], map[string]any{"range": edit.Range, "newText": edit.NewText})
+	}
+	return s.reply(msg.ID, map[string]any{"changes": changes}, nil)
 }
 func (s *Server) withDocument(msg message, fn func(string, *intel.Document) any) error {
 	var p struct {

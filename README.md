@@ -51,6 +51,10 @@ The embedded grammar was generated from `HigherOrderCO-archive/tree-sitter-bend`
 
 The repository is transfer-ready, but M31 Labs can maintain it independently so Bend's maintainers do not inherit an obligation.
 
+## Original project charter
+
+This implementation follows the referenced **Bend Language LSP Feasibility** specification: keep `gotreesitter-bend`-style grammar/runtime integration reusable, keep Bend compiler semantics authoritative, and layer a compiler-optional `bend-intel` engine plus `bendls` transport on top. The delivery mapping and deliberate non-goals are recorded in [the original-spec execution note](docs/original-spec.md).
+
 ## Current compatibility
 
 The initial archived-grammar baseline parses 348 of 525 files in the current Bend repository without an error node. The 177 failures are tracked as compatibility work, not hidden behind permissive recovery. See [the compatibility snapshot](docs/compatibility.md).
