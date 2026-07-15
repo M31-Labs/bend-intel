@@ -51,6 +51,19 @@ func TestServerAppliesIncrementalChange(t *testing.T) {
 	}
 }
 
+func TestShutdownReturnsNullResultAndExitStops(t *testing.T) {
+	input := bytes.NewBuffer(nil)
+	writeFrame(t, input, map[string]any{"jsonrpc": "2.0", "id": 9, "method": "shutdown"})
+	writeFrame(t, input, map[string]any{"jsonrpc": "2.0", "method": "exit"})
+	output := bytes.NewBuffer(nil)
+	if err := New(input, output).Run(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), `"result":null`) {
+		t.Fatalf("shutdown response missing null result: %s", output.String())
+	}
+}
+
 func writeFrame(t *testing.T, buffer *bytes.Buffer, value any) {
 	t.Helper()
 	body, err := json.Marshal(value)

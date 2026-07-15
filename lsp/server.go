@@ -19,12 +19,6 @@ type message struct {
 	Method  string          `json:"method,omitempty"`
 	Params  json.RawMessage `json:"params,omitempty"`
 }
-type response struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      json.RawMessage `json:"id"`
-	Result  any             `json:"result,omitempty"`
-	Error   *rpcError       `json:"error,omitempty"`
-}
 type rpcError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
@@ -52,8 +46,13 @@ func (s *Server) Run() error {
 		if err != nil {
 			return err
 		}
-		if err := s.handle(msg); err != nil && len(msg.ID) > 0 {
-			_ = s.reply(msg.ID, nil, &rpcError{-32603, err.Error()})
+		if err := s.handle(msg); err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			if len(msg.ID) > 0 {
+				_ = s.reply(msg.ID, nil, &rpcError{-32603, err.Error()})
+			}
 		}
 	}
 }
@@ -260,7 +259,13 @@ func (s *Server) read() (message, error) {
 	return msg, nil
 }
 func (s *Server) reply(id json.RawMessage, result any, rpcErr *rpcError) error {
-	return s.write(response{"2.0", id, result, rpcErr})
+	message := map[string]any{"jsonrpc": "2.0", "id": id}
+	if rpcErr != nil {
+		message["error"] = rpcErr
+	} else {
+		message["result"] = result
+	}
+	return s.write(message)
 }
 func (s *Server) notify(method string, params any) error {
 	return s.write(map[string]any{"jsonrpc": "2.0", "method": method, "params": params})
