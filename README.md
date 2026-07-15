@@ -1,5 +1,7 @@
 # Bend Intel
 
+[M31-Labs/bend-intel](https://github.com/M31-Labs/bend-intel) is a public MIT-licensed project.
+
 Pure-Go syntax and code intelligence for [Bend](https://github.com/HigherOrderCO/Bend), built on [gotreesitter](https://github.com/odvcencio/gotreesitter).
 
 This M31 Labs project is deliberately split into reusable layers:
@@ -20,7 +22,7 @@ go run ./cmd/bendls
 
 `check` exits non-zero when Tree-sitter reports syntax errors. `outline` emits stable JSON suitable for editor and agent integrations.
 
-`bendls` is a stdio LSP server with incremental UTF-16 document sync, immediate syntax diagnostics, document symbols, folding ranges, hover, same-file definitions, and references. A minimal Neovim setup is:
+`bendls` is a stdio LSP server with incremental UTF-16 document sync, immediate syntax diagnostics, document symbols, folding ranges, hover, definitions, references, semantic tokens, workspace symbols, contextual candidates, and cross-file rename. A minimal Neovim setup is:
 
 ```lua
 vim.api.nvim_create_autocmd("FileType", {
