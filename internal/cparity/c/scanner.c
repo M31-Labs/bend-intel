@@ -11,7 +11,9 @@ enum TokenType {
     INDENT,
     DEDENT,
     COMMENT,
+    NAT,
     PATH,
+    PATH_EXPR,
     ERROR_SENTINEL
 };
 
@@ -24,7 +26,7 @@ static inline bool identifier_char(uint32_t curr) {
     return (('0' <= curr && curr <= '9') ||
             ('a' <= curr && curr <= 'z') ||
             ('A' <= curr && curr <= 'Z') ||
-            (curr == '.' || curr == '-'));
+            (curr == '.' || curr == '-' || curr == '_'));
 }
 
 static inline void advance(TSLexer *lexer) { lexer->advance(lexer, false); }
@@ -61,12 +63,30 @@ bool tree_sitter_bend_external_scanner_scan(void *payload, TSLexer *lexer, const
             indent_length += 8;
             skip(lexer);
         } else if (lexer->lookahead == '#' && (valid_symbols[INDENT] || valid_symbols[DEDENT] ||
-                                               valid_symbols[NEWLINE])) {
-            // If we haven't found an EOL yet,
-            // then this is a comment after an expression:
-            //   foo = bar # comment
-            // Just return, since we don't want to generate an indent/dedent
-            // token.
+                                               valid_symbols[NEWLINE] || valid_symbols[NAT])) {
+            // A hash followed immediately by a digit is a functional natural
+            // literal. Consume the marker for lookahead; returning false
+            // lets the regular grammar tokenise the literal from the
+            // original byte.
+            lexer->advance(lexer, false);
+            if (lexer->lookahead == '{') {
+                // `#{...#}` is a multiline comment handled by the regular
+                // grammar token, not the indentation/comment scanner.
+                return false;
+            }
+            if ('0' <= lexer->lookahead && lexer->lookahead <= '9') {
+                if (!valid_symbols[NAT]) {
+                    return false;
+                }
+                while ('0' <= lexer->lookahead && lexer->lookahead <= '9') {
+                    advance(lexer);
+                }
+                lexer->result_symbol = NAT;
+                lexer->mark_end(lexer);
+                return true;
+            }
+            // If we haven't found an EOL yet, this is a comment after an
+            // expression. Do not generate an indentation token for it.
             if (!found_end_of_line) {
                 return false;
             }
@@ -117,6 +137,32 @@ bool tree_sitter_bend_external_scanner_scan(void *payload, TSLexer *lexer, const
 
     // Identifiers that end in a slash '/'.
     // The slash is not included in the symbol.
+    if (valid_symbols[PATH_EXPR] && valid_symbols[PATH]) {
+        if (identifier_char(lexer->lookahead)) {
+            advance(lexer);
+            while (identifier_char(lexer->lookahead)) {
+                advance(lexer);
+            }
+            if (lexer->lookahead == '/') {
+                lexer->mark_end(lexer);
+                // Constructor and pattern paths continue with `{` or `:`;
+                // keep those on the general PATH token. Expressions such as
+                // `List/Nil` use the expression-specific token.
+                advance(lexer);
+                while (identifier_char(lexer->lookahead)) {
+                    advance(lexer);
+                }
+                if (valid_symbols[PATH] && (lexer->lookahead == '{' || lexer->lookahead == ':')) {
+                    lexer->result_symbol = PATH;
+                } else {
+                    lexer->result_symbol = PATH_EXPR;
+                }
+                return valid_symbols[lexer->result_symbol];
+            }
+            return false;
+        }
+    }
+
     if (valid_symbols[PATH]) {
         if (identifier_char(lexer->lookahead)) {
             advance(lexer);
@@ -133,6 +179,7 @@ bool tree_sitter_bend_external_scanner_scan(void *payload, TSLexer *lexer, const
             return false;
         }
     }
+
 
     return false;
 }
@@ -164,7 +211,7 @@ void tree_sitter_bend_external_scanner_deserialize(void *payload, const char *bu
     }
 }
 
-void *tree_sitter_bend_external_scanner_create() {
+void *tree_sitter_bend_external_scanner_create(void) {
     Scanner *scanner = calloc(1, sizeof(Scanner));
     array_init(&scanner->indents);
     tree_sitter_bend_external_scanner_deserialize(scanner, NULL, 0);

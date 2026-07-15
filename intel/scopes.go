@@ -154,13 +154,44 @@ func firstNamedChildType(node *gotreesitter.Node, lang *gotreesitter.Language, t
 func addParameterBindings(node *gotreesitter.Node, scopeID int, graph *ScopeGraph, lang *gotreesitter.Language, source []byte) {
 	for i := 0; i < node.NamedChildCount(); i++ {
 		child := node.NamedChild(i)
-		if child != nil && child.Type(lang) == "identifier" {
+		if child == nil {
+			continue
+		}
+		if child.Type(lang) == "parameter" {
+			name := child.ChildByFieldName("name", lang)
+			if name != nil {
+				graph.Bindings = append(graph.Bindings, Binding{Name: name.Text(source), Kind: "parameter", Range: nodeRange(name), ScopeID: scopeID})
+			}
+			continue
+		}
+		if child.Type(lang) == "identifier" {
 			graph.Bindings = append(graph.Bindings, Binding{Name: child.Text(source), Kind: "parameter", Range: nodeRange(child), ScopeID: scopeID})
+			continue
+		}
+		if child.Type(lang) == "expression_identifier" {
+			if name := firstNamedChildType(child, lang, "identifier"); name != nil {
+				graph.Bindings = append(graph.Bindings, Binding{Name: name.Text(source), Kind: "parameter", Range: nodeRange(name), ScopeID: scopeID})
+			}
 		}
 	}
 }
 
 func addPatternBindings(node *gotreesitter.Node, scopeID int, graph *ScopeGraph, lang *gotreesitter.Language, source []byte) {
+	if node == nil {
+		return
+	}
+	if node.Type(lang) == "pattern" {
+		if name := node.ChildByFieldName("name", lang); name != nil {
+			graph.Bindings = append(graph.Bindings, Binding{Name: name.Text(source), Kind: "variable", Range: nodeRange(name), ScopeID: scopeID})
+			for i := 0; i < node.NamedChildCount(); i++ {
+				child := node.NamedChild(i)
+				if child != nil && child != name && child.Type(lang) != "type_expr" {
+					addPatternBindings(child, scopeID, graph, lang, source)
+				}
+			}
+			return
+		}
+	}
 	if node.Type(lang) == "identifier" {
 		graph.Bindings = append(graph.Bindings, Binding{Name: node.Text(source), Kind: "variable", Range: nodeRange(node), ScopeID: scopeID})
 		return

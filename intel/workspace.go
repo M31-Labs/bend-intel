@@ -21,7 +21,8 @@ type Import struct {
 }
 
 // Imports extracts import paths from the CST. Bend has both `import path` and
-// `from path import names`; both forms contain an os_path node.
+// `from path import names`; current Bend grammar versions represent the path
+// as a full identifier with a slash/path child.
 func (d *Document) Imports() []Import {
 	var out []Import
 	walk(d.Tree.RootNode(), func(n *gotreesitter.Node) {
@@ -31,7 +32,7 @@ func (d *Document) Imports() []Import {
 		}
 		for i := 0; i < n.NamedChildCount(); i++ {
 			child := n.NamedChild(i)
-			if child.Type(d.language) == "os_path" {
+			if child.Type(d.language) == "identifier" {
 				out = append(out, Import{Path: child.Text(d.Source), Range: nodeRange(child)})
 				break
 			}
@@ -205,6 +206,63 @@ type WorkspaceLocation struct {
 	URI   string `json:"uri"`
 	Range Range  `json:"range"`
 }
+
+// CallHierarchy returns syntax-derived call sites across indexed documents.
+// It intentionally includes only currently indexed files; unopened files are
+// loaded by Workspace.Load when a root is configured.
+func (w *Workspace) CallHierarchy(uri string, position Position) (incoming []WorkspaceCall, outgoing []WorkspaceCall) {
+	doc := w.Documents[uri]
+	if doc == nil {
+		return nil, nil
+	}
+	node := identifierAt(doc, position)
+	name := ""
+	if node != nil {
+		name = node.Text(doc.Source)
+	} else {
+		// LSP call-hierarchy items carry the whole definition range, whose
+		// start is often the `def` keyword rather than the name identifier.
+		// Accept that stable range as a fallback for clients that round-trip
+		// the item without preserving the prepare cursor.
+		for _, symbol := range doc.Symbols() {
+			if positionLE(symbol.Range.Start, position) && positionLE(position, symbol.Range.End) {
+				name = symbol.Name
+				break
+			}
+		}
+	}
+	if name == "" {
+		return nil, nil
+	}
+	for candidateURI, candidateDoc := range w.Documents {
+		for _, call := range candidateDoc.CallSites() {
+			if call.Callee == name {
+				incoming = append(incoming, WorkspaceCall{URI: candidateURI, Caller: call.Caller, Callee: call.Callee, Range: call.Range})
+			}
+			if candidateURI == uri && call.Caller == name {
+				outgoing = append(outgoing, WorkspaceCall{URI: candidateURI, Caller: call.Caller, Callee: call.Callee, Range: call.Range})
+			}
+		}
+	}
+	sort.Slice(incoming, func(i, j int) bool { return locationLess(incoming[i].Range, incoming[j].Range) })
+	sort.Slice(outgoing, func(i, j int) bool { return locationLess(outgoing[i].Range, outgoing[j].Range) })
+	return incoming, outgoing
+}
+
+type WorkspaceCall struct {
+	URI    string `json:"uri"`
+	Caller string `json:"caller"`
+	Callee string `json:"callee"`
+	Range  Range  `json:"range"`
+}
+
+func locationLess(a, b Range) bool {
+	if a.Start.Line == b.Start.Line {
+		return a.Start.Character < b.Start.Character
+	}
+	return a.Start.Line < b.Start.Line
+}
+
 type TextEdit struct {
 	URI     string `json:"uri"`
 	Range   Range  `json:"range"`

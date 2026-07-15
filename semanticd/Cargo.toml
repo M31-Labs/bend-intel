@@ -1,0 +1,12 @@
+[package]
+name = "bend-semanticd"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Optional Bend compiler semantic sidecar for bend-intel"
+
+[dependencies]
+bend = { package = "bend-lang", git = "https://github.com/HigherOrderCO/Bend.git", rev = "814453670d0e0d6777c1313c972764dba0491b7f", default-features = false }
+indexmap = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

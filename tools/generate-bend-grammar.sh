@@ -10,8 +10,19 @@ if [ ! -d "$gotreesitter_dir" ]; then
 fi
 
 cd "$gotreesitter_dir"
-go run ./cmd/grammargen emit \
-	-json "$root/bendlang/grammar/grammar.json" \
-	-bin "$root/bendlang/grammar/bend.bin"
+
+# Keep the runtime artifact byte-for-byte aligned with the C Tree-sitter
+# witness. grammargen remains useful for inspecting grammar.json, but the
+# parser-core reengineering boundary is validated against parser.c itself.
+# ts2go extracts the C parse tables and scanner-election metadata into the
+# pure-Go blob consumed by Bend Intel; no CGo is needed at runtime.
+generated=$(mktemp -d)
+trap 'rm -rf "$generated"' EXIT
+go run ./cmd/ts2go \
+	-input "$root/internal/cparity/c/parser.c" \
+	-output "$generated/bend_generated.go" \
+	-package bendgenerated \
+	-name bend
+cp "$generated/grammar_blobs/bend.bin" "$root/bendlang/grammar/bend.bin"
 
 sha256sum "$root/bendlang/grammar/grammar.json" "$root/bendlang/grammar/bend.bin"

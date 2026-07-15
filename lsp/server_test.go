@@ -104,6 +104,19 @@ type testSemanticBackend struct {
 	calls        atomic.Int32
 }
 
+type staticSemanticBackend struct{}
+
+func (staticSemanticBackend) Check(_ context.Context, _ intel.WorkspaceSnapshot, _ string) (*intel.SemanticResult, error) {
+	return &intel.SemanticResult{
+		Types:      []intel.TypedSpan{{Range: intel.Range{Start: intel.Position{Line: 4, Character: 9}, End: intel.Position{Line: 4, Character: 12}}, Type: "u24"}},
+		Signatures: []intel.Signature{{Name: "add", Parameters: []string{"x: u24"}, ReturnType: "u24"}},
+	}, nil
+}
+
+func (staticSemanticBackend) Lower(_ context.Context, _ intel.WorkspaceSnapshot, _ string) (*intel.SemanticResult, error) {
+	return &intel.SemanticResult{HVM: "@main = 0\n"}, nil
+}
+
 func (b *testSemanticBackend) Check(_ context.Context, _ intel.WorkspaceSnapshot, _ string) (*intel.SemanticResult, error) {
 	call := int(b.calls.Add(1))
 	b.started <- call
@@ -147,6 +160,57 @@ func TestSemanticBackendDropsStaleVersionResults(t *testing.T) {
 	}
 	if strings.Contains(got, `"message":"stale"`) {
 		t.Fatalf("stale semantic result published: %s", got)
+	}
+}
+
+func TestSemanticHoverSignatureAndCallHierarchy(t *testing.T) {
+	output := bytes.NewBuffer(nil)
+	s := New(bytes.NewBuffer(nil), output)
+	s.SetSemanticBackend(staticSemanticBackend{})
+	open := map[string]any{"textDocument": map[string]any{"uri": "file:///semantic.bend", "version": 1, "text": "def add(x: u24) -> u24:\n  return x\n\ndef main():\n  return add(1)\n"}}
+	raw, _ := json.Marshal(open)
+	if err := s.didOpen(raw); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		s.semanticMu.Lock()
+		ready := s.semanticResult["file:///semantic.bend"] != nil
+		s.semanticMu.Unlock()
+		if ready {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	s.semanticMu.Lock()
+	ready := s.semanticResult["file:///semantic.bend"] != nil
+	s.semanticMu.Unlock()
+	if !ready {
+		t.Fatal("semantic result did not arrive")
+	}
+	params := func(method string, id int) message {
+		rawParams, _ := json.Marshal(map[string]any{"textDocument": map[string]any{"uri": "file:///semantic.bend"}, "position": map[string]any{"line": 4, "character": 10}})
+		return message{Method: method, ID: json.RawMessage(fmt.Sprintf("%d", id)), Params: rawParams}
+	}
+	if err := s.handle(params("textDocument/hover", 1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.handle(params("textDocument/signatureHelp", 2)); err != nil {
+		t.Fatal(err)
+	}
+	hvmParams, _ := json.Marshal(map[string]any{"textDocument": map[string]any{"uri": "file:///semantic.bend"}})
+	if err := s.handle(message{Method: "bend/hvmView", ID: json.RawMessage("4"), Params: hvmParams}); err != nil {
+		t.Fatal(err)
+	}
+	callParams, _ := json.Marshal(map[string]any{"item": map[string]any{"uri": "file:///semantic.bend", "name": "main"}})
+	if err := s.handle(message{Method: "callHierarchy/outgoingCalls", ID: json.RawMessage("3"), Params: callParams}); err != nil {
+		t.Fatal(err)
+	}
+	got := output.String()
+	for _, want := range []string{"u24", "add(x: u24)", `"to"`, `"name":"add"`, `"compiler-hvm"`, `@main = 0`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("semantic response missing %s: %s", want, got)
+		}
 	}
 }
 

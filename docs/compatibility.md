@@ -1,56 +1,85 @@
 # Compatibility snapshot
 
-Snapshot date: 2026-07-15. Source checkout: `HigherOrderCO/Bend` at
-`814453670d0e0d6777c1313c972764dba0491b7f` (Bend 0.2.38). Grammar source:
-the archived `tree-sitter-bend` commit recorded in
-[`bendlang/grammar/UPSTREAM.md`](../bendlang/grammar/UPSTREAM.md).
+Snapshot date: 2026-07-15. Bend source checkout:
+`HigherOrderCO/Bend@814453670d0e0d6777c1313c972764dba0491b7f` (0.2.38).
+The grammar starts from the archived Tree-sitter Bend commit documented in
+[`bendlang/grammar/UPSTREAM.md`](../bendlang/grammar/UPSTREAM.md), with the
+source and generated artifacts checked into this repository.
 
-This repository deliberately reports two different populations. The current
-examples are a useful language sample; the golden-test tree contains both
-valid and intentionally invalid fixtures and must not be presented as current
-language coverage.
+## Current examples
 
-| Corpus | Files | Raw Go tree without `ERROR` | Intel recovery without diagnostics | C/Go exact shape | Shared C+Go error | Other parity classes |
-|---|---:|---:|---:|---:|---:|---:|
-| `examples/` | 16 | 2 | 11 | 1 | 14 | 1 tree mismatch |
-| `tests/golden_tests/` | 508 | fixture-dependent | fixture-dependent | 295 | 140 | 8 C-only, 45 Go-only, 20 tree mismatch |
+The 16 files in Bend's `examples/` are the most useful smoke corpus. The
+report distinguishes raw parser health from the range-preserving structural
+view used by `intel`:
 
-The archived grammar predates current typed signatures and other Bend 0.2.38
-surface syntax. `intel` has a deliberately narrow, range-preserving recovery
-view for typed headers, current shift expressions, `unchecked`/`const` markers,
-constructor return paths, and the scanner's comment-after-indentation edge. It
-does not rewrite the user's source or validate those semantics; Bend remains
-the authority. The recovery view makes 11 examples structurally clean and
-keeps lexical top-level symbols for all 16, while the five remaining examples
-retain explicit diagnostics for older functional constructs. This is an
-honest compatibility signal, not a claim that the archived grammar recognizes
-all current Bend.
+| Measure | Result |
+|---|---:|
+| Raw Go trees accepted without root error/stop/truncation | 16/16 |
+| Structural trees complete after explicit recovery | 16/16 |
+| Examples with zero `intel` diagnostics | 16/16 |
+| Trees marked `Recovered()` | 0/16 |
+| C/Go exact named-tree and metadata witness | 16/16 |
+
+The current examples require no recovery. The recovery layer is still retained
+for incomplete editor buffers and negative fixtures; it never edits the user's
+source, masks only a fresh parser candidate, preserves byte/point ranges, and
+exposes the distinction through `Document.Health()`.
+
+Raw parser stop metadata is not hidden. A `no_stacks_alive` or truncated raw
+tree is counted as unhealthy even when no named `ERROR` node was materialized.
+This prevents the silent-prefix failure that motivated
+[`docs/gotreesitter-findings.md`](gotreesitter-findings.md).
+
+## Full Bend checkout
+
+The current checkout contains 525 files across valid programs, negative tests,
+and recovery fixtures. It is not a valid-language coverage denominator. The
+latest report is:
+
+```text
+raw metadata-clean:       469/525
+intel complete:           475/525
+intel diagnostics-free:   475/525
+recovered:                 56
+incomplete:                50
+diagnostics:              211
+raw stop reasons:         accepted 524, no_stacks_alive 1
+```
+
+The intentionally invalid fixtures account for much of the latter population;
+they are retained to exercise error recovery rather than converted into false
+green compatibility claims.
+
+The opt-in C witness compares 462/525 mixed fixtures exactly. The strict
+release gate is intentionally based on the 16 current Bend examples (the
+language's maintained smoke corpus), while negative and historical golden
+fixtures continue to exercise error recovery and parser-boundary behavior.
 
 ## Reproduce
 
-Build the pure-Go checker and run the optional C-runtime witness:
-
 ```sh
-go build -o /tmp/bend-intel ./cmd/bend-intel
 go run ./cmd/bend-corpus-report -path /path/to/Bend/examples
 ./tools/run-bend-parity.sh /path/to/Bend/examples
-./tools/run-bend-parity.sh /path/to/Bend/tests/golden_tests
+BEND_ROOT=/path/to/Bend ./tools/validate-roadmap.sh
 ```
 
-The parity command emits one JSON record per file with `equal`, `cError`, and
-`goError` fields. A mismatch is actionable evidence for grammar/runtime work;
-it is not silently converted into a successful parse.
+`run-bend-parity.sh` is an opt-in C-runtime witness. It compares named
+S-expression shape, fields, ranges, error/missing/extra flags, and byte
+metadata. A mismatch is reported, never silently accepted.
 
-`bend-corpus-report` emits raw parser error counts, recovery use, structural
-diagnostic counts, and symbol counts. It is intentionally separate from the
-C-runtime witness so the report remains available in pure-Go builds.
+For the strict parser-core gate:
 
-## Current-language boundary
+```sh
+BEND_ROOT=/path/to/Bend ./tools/validate-roadmap.sh --strict-parser-core
+```
 
-The grammar package currently follows the archived Tree-sitter grammar rather
-than inventing a second Bend dialect. Syntax added by the compiler should be
-introduced through a corpus fixture, a grammar update, and a parity report.
-Until then, `bend-intel` still provides useful partial trees, syntax
-diagnostics, symbols, navigation, folding, and completion around incomplete or
-unsupported code. Bend's compiler remains the authority for type checking,
-imports, and semantic diagnostics.
+That gate is green for the current Bend examples. It remains a required check
+when the parser core or grammar changes.
+
+## Language boundary
+
+The grammar package follows the compiler rather than inventing an independent
+Bend dialect. When Bend syntax changes, add a compiler fixture, update the
+grammar source, regenerate the blob, and record the parity result. Until a
+grammar/runtime change is reviewed, `bend-intel` can still provide partial
+trees, explicit health, symbols, navigation, and completion around the source.

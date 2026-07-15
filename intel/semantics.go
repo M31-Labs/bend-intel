@@ -31,10 +31,12 @@ type SemanticDefinition struct {
 }
 
 type SemanticResult struct {
+	Protocol    string               `json:"protocol,omitempty"`
 	Diagnostics []Diagnostic         `json:"diagnostics,omitempty"`
 	Types       []TypedSpan          `json:"types,omitempty"`
 	Signatures  []Signature          `json:"signatures,omitempty"`
 	Definitions []SemanticDefinition `json:"definitions,omitempty"`
+	HVM         string               `json:"hvm,omitempty"`
 }
 
 // SemanticBackend is the optional Bend compiler boundary. Implementations may
@@ -42,6 +44,13 @@ type SemanticResult struct {
 // reimplements Bend's type system.
 type SemanticBackend interface {
 	Check(context.Context, WorkspaceSnapshot, string) (*SemanticResult, error)
+}
+
+// SemanticLoweringBackend is an optional, on-demand extension. Lowering is
+// deliberately separate from Check so an editor does not serialize a large
+// generated HVM book on every keystroke.
+type SemanticLoweringBackend interface {
+	Lower(context.Context, WorkspaceSnapshot, string) (*SemanticResult, error)
 }
 
 type DisabledBackend struct{}

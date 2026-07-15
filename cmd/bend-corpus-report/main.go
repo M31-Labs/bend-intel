@@ -15,23 +15,31 @@ import (
 )
 
 type fileReport struct {
-	Path        string `json:"path"`
-	RawErrors   int    `json:"rawErrors"`
-	IntelErrors int    `json:"intelErrors"`
-	Recovered   bool   `json:"recovered"`
-	SymbolCount int    `json:"symbolCount"`
-	ParseError  string `json:"parseError,omitempty"`
+	Path            string `json:"path"`
+	RawErrors       int    `json:"rawErrors"`
+	RawRootHasError bool   `json:"rawRootHasError,omitempty"`
+	RawStopped      bool   `json:"rawStopped,omitempty"`
+	RawTruncated    bool   `json:"rawTruncated,omitempty"`
+	RawEndByte      uint32 `json:"rawEndByte,omitempty"`
+	RawStopReason   string `json:"rawStopReason,omitempty"`
+	IntelErrors     int    `json:"intelErrors"`
+	IntelComplete   bool   `json:"intelComplete"`
+	Recovered       bool   `json:"recovered"`
+	SymbolCount     int    `json:"symbolCount"`
+	ParseError      string `json:"parseError,omitempty"`
 }
 
 type corpusReport struct {
-	Root        string       `json:"root"`
-	Files       int          `json:"files"`
-	RawClean    int          `json:"rawClean"`
-	IntelClean  int          `json:"intelClean"`
-	Recovered   int          `json:"recovered"`
-	WithSymbols int          `json:"withSymbols"`
-	Diagnostics int          `json:"diagnostics"`
-	Entries     []fileReport `json:"entries"`
+	Root          string       `json:"root"`
+	Files         int          `json:"files"`
+	RawClean      int          `json:"rawClean"`
+	IntelClean    int          `json:"intelClean"`
+	Recovered     int          `json:"recovered"`
+	WithSymbols   int          `json:"withSymbols"`
+	Diagnostics   int          `json:"diagnostics"`
+	IntelComplete int          `json:"intelComplete"`
+	Incomplete    int          `json:"incomplete"`
+	Entries       []fileReport `json:"entries"`
 }
 
 func main() {
@@ -60,7 +68,7 @@ func main() {
 		if err != nil {
 			entry.ParseError = err.Error()
 		} else {
-			entry.RawErrors = errorCount(rawTree.RootNode())
+			entry.RawErrors, entry.RawRootHasError, entry.RawStopped, entry.RawTruncated, entry.RawEndByte, entry.RawStopReason = parseIssues(rawTree, len(source))
 		}
 		doc, err := intel.Parse(source)
 		if err != nil {
@@ -74,6 +82,7 @@ func main() {
 				}
 			}
 			entry.Recovered = doc.Recovered()
+			entry.IntelComplete = doc.Complete()
 			entry.SymbolCount = len(doc.Symbols())
 		}
 		report.Entries = append(report.Entries, entry)
@@ -86,6 +95,11 @@ func main() {
 		}
 		if entry.IntelErrors == 0 && entry.ParseError == "" {
 			report.IntelClean++
+		}
+		if entry.IntelComplete {
+			report.IntelComplete++
+		} else {
+			report.Incomplete++
 		}
 		if entry.Recovered {
 			report.Recovered++
@@ -133,6 +147,33 @@ func errorCount(node *gotreesitter.Node) int {
 		count += errorCount(node.NamedChild(i))
 	}
 	return count
+}
+
+// parseIssues deliberately includes parser runtime metadata. A partial tree
+// can have no named ERROR node: the parser may stop with no_stacks_alive while
+// returning a plausible source_file prefix. Counting only IsError therefore
+// turns a silent truncation into a false green corpus result.
+func parseIssues(tree *gotreesitter.Tree, sourceLen int) (count int, rootHasError, stopped, truncated bool, endByte uint32, stopReason string) {
+	if tree == nil || tree.RootNode() == nil {
+		return 1, true, true, true, 0, "nil-tree"
+	}
+	root := tree.RootNode()
+	count = errorCount(root)
+	rootHasError = root.HasError()
+	stopped = tree.ParseStopReason() != gotreesitter.ParseStopAccepted
+	endByte = root.EndByte()
+	truncated = int(endByte) < sourceLen
+	stopReason = string(tree.ParseStopReason())
+	if rootHasError {
+		count++
+	}
+	if stopped {
+		count++
+	}
+	if truncated {
+		count++
+	}
+	return count, rootHasError, stopped, truncated, endByte, stopReason
 }
 
 func fail(err error) {

@@ -7,19 +7,19 @@ package cparity
 
 /*
 #cgo CFLAGS: -I${SRCDIR}/c
-#include "scanner.c"
 #include "parser.c"
+#include "scanner.c"
 */
 import "C"
 
 import (
-	"context"
+	"fmt"
 	"strings"
 	"unsafe"
 
 	"github.com/M31-Labs/bend-intel/bendlang"
 	gotreesitter "github.com/odvcencio/gotreesitter"
-	sitter "github.com/smacker/go-tree-sitter"
+	sitter "github.com/tree-sitter/go-tree-sitter"
 )
 
 // Parse returns the C Tree-sitter named S-expression for source.
@@ -30,16 +30,19 @@ func Parse(source []byte) (string, error) {
 	}
 	defer parser.Close()
 	defer tree.Close()
-	return tree.RootNode().String(), nil
+	return tree.RootNode().ToSexp(), nil
 }
 
 func parseCTree(source []byte) (*sitter.Parser, *sitter.Tree, error) {
 	parser := sitter.NewParser()
-	parser.SetLanguage(sitter.NewLanguage(unsafe.Pointer(C.tree_sitter_bend())))
-	tree, err := parser.ParseCtx(context.Background(), nil, source)
-	if err != nil {
+	if err := parser.SetLanguage(sitter.NewLanguage(unsafe.Pointer(C.tree_sitter_bend()))); err != nil {
 		parser.Close()
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("set C Bend language: %w", err)
+	}
+	tree := parser.Parse(source, nil)
+	if tree == nil {
+		parser.Close()
+		return nil, nil, fmt.Errorf("C parser returned nil tree")
 	}
 	return parser, tree, nil
 }
@@ -75,7 +78,7 @@ func Compare(source []byte) (Result, error) {
 		return Result{}, err
 	}
 	goSExpr := goShape(goTree.RootNode(), lang)
-	cSExpr := cTree.RootNode().String()
+	cSExpr := cTree.RootNode().ToSexp()
 	return Result{Equal: cSExpr == goSExpr && metadataEqual(cTree.RootNode(), goTree.RootNode(), lang), CError: strings.Contains(cSExpr, "(ERROR"), GoError: strings.Contains(goSExpr, "(ERROR"), CTree: cSExpr, GoTree: goSExpr}, nil
 }
 
@@ -100,21 +103,21 @@ func goShape(node *gotreesitter.Node, lang *gotreesitter.Language) string {
 }
 
 func metadataEqual(cNode *sitter.Node, goNode *gotreesitter.Node, lang *gotreesitter.Language) bool {
-	if cNode.Type() != goNode.Type(lang) || cNode.IsNamed() != goNode.IsNamed() || cNode.IsMissing() != goNode.IsMissing() || cNode.IsExtra() != goNode.IsExtra() || cNode.StartByte() != goNode.StartByte() || cNode.EndByte() != goNode.EndByte() {
+	if cNode.Kind() != goNode.Type(lang) || cNode.IsNamed() != goNode.IsNamed() || cNode.IsMissing() != goNode.IsMissing() || cNode.IsExtra() != goNode.IsExtra() || cNode.StartByte() != uint(goNode.StartByte()) || cNode.EndByte() != uint(goNode.EndByte()) {
 		return false
 	}
-	if cNode.ChildCount() != uint32(goNode.ChildCount()) {
+	if cNode.ChildCount() != uint(goNode.ChildCount()) {
 		return false
 	}
-	for i := uint32(0); i < cNode.ChildCount(); i++ {
-		cChild, goChild := cNode.Child(int(i)), goNode.Child(int(i))
+	for i := uint(0); i < cNode.ChildCount(); i++ {
+		cChild, goChild := cNode.Child(i), goNode.Child(int(i))
 		if cChild == nil || goChild == nil {
 			if cChild != nil || goChild != nil {
 				return false
 			}
 			continue
 		}
-		if cNode.FieldNameForChild(int(i)) != goNode.FieldNameForChild(int(i), lang) || !metadataEqual(cChild, goChild, lang) {
+		if cNode.FieldNameForChild(uint32(i)) != goNode.FieldNameForChild(int(i), lang) || !metadataEqual(cChild, goChild, lang) {
 			return false
 		}
 	}

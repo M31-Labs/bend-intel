@@ -33,6 +33,11 @@ func (d *Document) ApplyChanges(changes []TextChange) error {
 		if !ok || end < start {
 			return fmt.Errorf("invalid change end: %+v", change.Range.End)
 		}
+		// A recovery tree is a structural hypothesis, not a safe incremental
+		// reuse base. Reparse from the edited source when the old tree carried
+		// an error/stop or was built from masked bytes; this avoids preserving a
+		// stale GLR branch when an edit completes previously invalid syntax.
+		freshRequired := d.Recovered() || d.Tree == nil || d.Tree.RootNode() == nil || d.Tree.RootNode().HasError() || d.Tree.ParseStopReason() != gotreesitter.ParseStopAccepted
 		next := make([]byte, 0, len(d.Source)-(end-start)+len(change.Text))
 		next = append(next, d.Source[:start]...)
 		next = append(next, change.Text...)
@@ -46,6 +51,14 @@ func (d *Document) ApplyChanges(changes []TextChange) error {
 			parsedSource = d.Source
 		}
 		nextParsedSource := replaceBytes(parsedSource, start, end, []byte(change.Text))
+		if freshRequired {
+			parsed, err := Parse(next)
+			if err != nil {
+				return err
+			}
+			d.Source, d.Tree, d.language, d.treeSource, d.scopeGraph = parsed.Source, parsed.Tree, parsed.language, parsed.treeSource, nil
+			continue
+		}
 		d.Tree.Edit(edit)
 		parser, err := bendlang.NewParser()
 		if err != nil {

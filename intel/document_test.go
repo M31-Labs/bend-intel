@@ -1,6 +1,15 @@
 package intel
 
-import "testing"
+import (
+	_ "embed"
+	"testing"
+
+	"github.com/M31-Labs/bend-intel/bendlang"
+	gotreesitter "github.com/odvcencio/gotreesitter"
+)
+
+//go:embed testdata/radix_prefix.bend
+var radixPrefix []byte
 
 func TestOutlineImperativeFunction(t *testing.T) {
 	doc, err := Parse([]byte("def add(x, y):\n  return x + y\n"))
@@ -84,7 +93,7 @@ func TestScopeGraphIncludesMatchArmBindings(t *testing.T) {
 	}
 }
 
-func TestTypedHeaderRecoveryKeepsOriginalRanges(t *testing.T) {
+func TestTypedHeaderParsesWithoutRecovery(t *testing.T) {
 	source := []byte("def main(x: u24) -> IO(u24):\n  return x\n")
 	doc, err := Parse(source)
 	if err != nil {
@@ -100,8 +109,8 @@ func TestTypedHeaderRecoveryKeepsOriginalRanges(t *testing.T) {
 	if got := string(doc.Source); got != string(source) {
 		t.Fatalf("recovery changed source = %q", got)
 	}
-	if !doc.Recovered() {
-		t.Fatal("typed header should report structural recovery")
+	if doc.Recovered() {
+		t.Fatal("current typed header should parse without structural recovery")
 	}
 }
 
@@ -135,5 +144,45 @@ func TestCurrentTypedBendRecoveryKeepsLaterDefinitions(t *testing.T) {
 	}
 	if diagnostics := doc.Diagnostics(); len(diagnostics) != 0 {
 		t.Fatalf("recovered diagnostics = %#v", diagnostics)
+	}
+}
+
+func TestParseHealthCatchesSilentNoStacksPrefix(t *testing.T) {
+	source := append([]byte(nil), radixPrefix...)
+	parser, err := bendlang.NewParser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := parser.Parse(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if raw.ParseStopReason() == gotreesitter.ParseStopAccepted && !raw.RootNode().HasError() {
+		t.Fatalf("raw parser unexpectedly accepted hidden failure: stop=%s tree=%s", raw.ParseStopReason(), raw.RootNode().SExpr(raw.Language()))
+	}
+	doc, err := Parse(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !doc.Complete() || !doc.Recovered() || doc.Health().Stopped {
+		t.Fatalf("recovery health = %#v", doc.Health())
+	}
+	if diagnostics := doc.Diagnostics(); len(diagnostics) != 0 {
+		t.Fatalf("recovered diagnostics = %#v", diagnostics)
+	}
+}
+
+func TestIncompleteStructuralTreePublishesParserDiagnostic(t *testing.T) {
+	source := []byte("def f(x: u24) -> u24:\n")
+	doc, err := Parse(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doc.Complete() {
+		t.Fatalf("fixture unexpectedly complete: %#v", doc.Health())
+	}
+	diagnostics := doc.Diagnostics()
+	if len(diagnostics) == 0 {
+		t.Fatalf("diagnostics = %#v, health = %#v", diagnostics, doc.Health())
 	}
 }

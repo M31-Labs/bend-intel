@@ -7,7 +7,9 @@ const (
 	tokenIndent
 	tokenDedent
 	tokenComment
+	tokenNat
 	tokenPath
+	tokenPathExpr
 	tokenErrorSentinel
 	bendTokenCount
 )
@@ -67,8 +69,24 @@ func (s externalScanner) Scan(payload any, lexer *gotreesitter.ExternalLexer, va
 			indent += 8
 			lexer.Advance(true)
 		case '#':
-			if !(isValid(valid, tokenIndent) || isValid(valid, tokenDedent) || isValid(valid, tokenNewline)) {
+			if !(isValid(valid, tokenIndent) || isValid(valid, tokenDedent) || isValid(valid, tokenNewline) || isValid(valid, tokenNat)) {
 				goto whitespaceDone
+			}
+			lexer.Advance(false)
+			if lexer.Lookahead() == '{' {
+				// Multiline comments are ordinary grammar extras. Leave the
+				// input untouched for the regular lexer to consume them.
+				return false
+			}
+			if lexer.Lookahead() >= '0' && lexer.Lookahead() <= '9' {
+				if !isValid(valid, tokenNat) {
+					return false
+				}
+				for lexer.Lookahead() >= '0' && lexer.Lookahead() <= '9' {
+					lexer.Advance(false)
+				}
+				lexer.MarkEnd()
+				return s.emit(lexer, tokenNat)
 			}
 			if !foundEOL {
 				return false
@@ -104,6 +122,32 @@ whitespaceDone:
 			return s.emit(lexer, tokenNewline)
 		}
 	}
+	if isValid(valid, tokenPathExpr) && isValid(valid, tokenPath) && isIdentifierChar(lexer.Lookahead()) {
+		// The path-expression token is only elected when the general PATH
+		// context is also eligible. This avoids speculatively consuming an
+		// ordinary identifier on runtimes that do not rewind a failed external
+		// scan before the next GLR branch.
+		lexer.Advance(false)
+		for isIdentifierChar(lexer.Lookahead()) {
+			lexer.Advance(false)
+		}
+		if lexer.Lookahead() == '/' {
+			lexer.MarkEnd()
+			lexer.Advance(false)
+			// Inspect the path's final component before choosing the token
+			// class. The constructor delimiter follows the component
+			// (`Tree/Node {`), not the slash itself.
+			for isIdentifierChar(lexer.Lookahead()) {
+				lexer.Advance(false)
+			}
+			if isValid(valid, tokenPath) && (lexer.Lookahead() == '{' || lexer.Lookahead() == ':') {
+				return s.emit(lexer, tokenPath)
+			}
+			if isValid(valid, tokenPathExpr) {
+				return s.emit(lexer, tokenPathExpr)
+			}
+		}
+	}
 	if isValid(valid, tokenPath) && isIdentifierChar(lexer.Lookahead()) {
 		lexer.Advance(false)
 		for isIdentifierChar(lexer.Lookahead()) {
@@ -125,5 +169,5 @@ func (s externalScanner) emit(lexer *gotreesitter.ExternalLexer, token int) bool
 func isValid(valid []bool, token int) bool { return token >= 0 && token < len(valid) && valid[token] }
 
 func isIdentifierChar(r rune) bool {
-	return r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r == '.' || r == '-'
+	return r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r == '.' || r == '-' || r == '_'
 }

@@ -9,8 +9,9 @@ import (
 )
 
 func main() {
-	if len(os.Args) != 3 || (os.Args[1] != "check" && os.Args[1] != "outline") {
-		fmt.Fprintln(os.Stderr, "usage: bend-intel <check|outline> <file.bend>")
+	commands := map[string]bool{"check": true, "outline": true, "status": true, "calls": true, "parallel": true, "patterns": true, "hvm": true}
+	if len(os.Args) != 3 || !commands[os.Args[1]] {
+		fmt.Fprintln(os.Stderr, "usage: bend-intel <check|outline|status|calls|parallel|patterns|hvm> <file.bend>")
 		os.Exit(2)
 	}
 	source, err := os.ReadFile(os.Args[2])
@@ -25,6 +26,36 @@ func main() {
 	enc.SetIndent("", "  ")
 	if os.Args[1] == "outline" {
 		if err := enc.Encode(doc.Symbols()); err != nil {
+			fail(err)
+		}
+		return
+	}
+	if os.Args[1] == "status" {
+		if err := enc.Encode(doc.Health()); err != nil {
+			fail(err)
+		}
+		return
+	}
+	if os.Args[1] == "calls" {
+		if err := enc.Encode(doc.CallSites()); err != nil {
+			fail(err)
+		}
+		return
+	}
+	if os.Args[1] == "parallel" {
+		if err := enc.Encode(doc.ParallelStructure()); err != nil {
+			fail(err)
+		}
+		return
+	}
+	if os.Args[1] == "patterns" {
+		if err := enc.Encode(doc.PatternCoverage()); err != nil {
+			fail(err)
+		}
+		return
+	}
+	if os.Args[1] == "hvm" {
+		if _, err := fmt.Fprintln(os.Stdout, doc.HVMView()); err != nil {
 			fail(err)
 		}
 		return

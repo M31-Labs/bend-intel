@@ -1,0 +1,180 @@
+const { optionalCommaSep1, commaSep1, sep1 } = require('./grammar/utils')
+const { PREC, SEMICOLON } = require('./grammar/constants')
+
+const imp = require('./grammar/imp')
+const fun = require('./grammar/fun')
+const common = require('./grammar/common')
+
+// Grammar
+// =======
+
+module.exports = grammar({
+  name: 'bend',
+
+  rules: {
+    source_file: $ => repeat($._top_level_defs),
+
+    ...common, // Common rules between syntaxes
+    ...imp, // Imperative-like syntax
+    ...fun, // Functional-like syntax
+
+    // Top-level definitions
+    // =====================
+
+    _top_level_defs: $ => prec.dynamic(10, choice(
+      $._import,
+      prec.dynamic(10, $._func_def),
+      $.object_definition,
+      $._type_definition,
+      $.hvm_definition
+    )),
+
+    // Import definition
+    // =================
+
+    _import: $ => choice(
+      $.import_name,
+      $.import_from
+    ),
+
+    import_name: $ => seq(
+      'import',
+      $.identifier
+    ),
+
+    import_from: $ => seq(
+      'from',
+      $.identifier,
+      'import',
+      $.import_items
+    ),
+
+    import_items: $ => choice(
+      $.import_item,
+      seq('(', commaSep1($.import_item), optional(','), ')')
+    ),
+
+    import_item: $ => seq(
+      $.identifier,
+      optional(seq('as', $.identifier))
+    ),
+
+    // Function definitions
+    // ====================
+
+    _func_def: $ => choice(
+      $.imp_function_definition, // Uses "Statements"
+      $.fun_function_definition, // Uses "Terms"
+      $.fun_function_signature, // Functional rule-group signature
+    ),
+
+    // Object definitions
+    // ==================
+
+    object_definition: $ => seq(
+      'object',
+      field('name', $.identifier),
+      $._object_def_body,
+    ),
+
+    _object_def_body: $ => seq(
+      '{',
+      optional(commaSep1(field('field', $.object_field))),
+      optional(','),
+      '}',
+    ),
+
+    object_field: $ => $.identifier,
+
+    // Type definitions
+    // ================
+
+    _type_definition: $ => choice(
+      $.imp_type_definition,
+      $.fun_type_definition
+    ),
+
+    // HVM defintions
+    // ==============
+
+    hvm_definition: $ => seq(
+      'hvm',
+      field('name', $.identifier),
+      ':',
+      // $._newline,
+      $._indent,
+      // TODO: multiple lines of `hvm_code` should be the same expression
+      repeat1(field('code', $.hvm_code)),
+      $._dedent
+    ),
+  },
+
+  extras: $ => [
+    $.multiline_comment,
+    $.comment,
+    /[\s\f\uFEFF\u2060\u200B]|\r?\n/,
+  ],
+
+  externals: $ => [
+    $._newline,
+    $._indent,
+    $._dedent,
+
+    // Mark comments as external tokens so that the external scanner is always
+    // invoked, even if no external token is expected. This allows for better
+    // error recovery, because the external scanner can maintain the overall
+    // structure by returning dedent tokens whenever a dedent occurs, even
+    // if no dedent is expected.
+    $.comment,
+
+    // Functional natural literals such as #25 must not be swallowed as
+    // comments by the indentation scanner.
+    $.nat,
+
+    // Normal identifiers with a slash '/' after their last character.
+    $.path,
+    $.path_expr,
+
+    $.error_sentinel
+  ],
+
+  inline: $ => [
+    $._simple_statement,
+    $._compound_statement,
+    $.expression,
+    $.simple_expression,
+  ],
+
+  conflicts: $ => [
+    [$._func_def, $.fun_local_def],
+    [$._function_pattern, $._terms_no_let],
+    [$.identifier, $.path_identifier],
+    [$.for_clause],
+    [$.imp_eraser],
+    [$.fun_type_constructor],
+    [$.fun_type_constructor_fields],
+    [$.imp_constructor, $.imp_superposition],
+    [$.imp_lambda, $.imp_constructor],
+    // Numeric operators should win over the standalone eraser when the
+    // leading `*` is followed by a term list.
+    [$.imp_tuple, $.arguments],
+    [$.imp_tuple, $._imp_arg],
+    [$.imp_tree_leaf, $.imp_constructor],
+    [$._function_pattern, $._terms],
+    [$._fun_args],
+    [$.pattern, $.typed_pattern],
+    [$.tuple_expression, $.imp_superposition],
+    [$.tuple_expression, $._imp_arg],
+    [$.tuple_expression, $.imp_tree_leaf],
+    [$.tuple_expression, $.imp_lambda],
+    [$.tuple_expression, $.imp_tuple],
+    [$.tuple_expression, $._imp_arg_bind],
+    [$.tuple_expression, $._pair],
+    [$.tuple_expression, $.imp_list],
+    [$.tuple_expression, $.imp_tuple, $._imp_arg]
+  ],
+
+  word: $ => $._normal_identifier,
+
+  supertypes: $ => [$._id],
+});

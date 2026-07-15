@@ -47,11 +47,60 @@ type Document struct {
 	scopeGraph *ScopeGraph
 }
 
+// ParseHealth describes the structural parser result independently of syntax
+// ERROR nodes. gotreesitter intentionally returns partial trees for editor
+// workloads, so callers must inspect the stop reason and covered byte range
+// before treating a tree as a complete parse.
+type ParseHealth struct {
+	Complete     bool   `json:"complete"`
+	Recovered    bool   `json:"recovered"`
+	RootHasError bool   `json:"rootHasError"`
+	Stopped      bool   `json:"stopped"`
+	StopReason   string `json:"stopReason"`
+	EndByte      uint32 `json:"endByte"`
+	SourceBytes  int    `json:"sourceBytes"`
+}
+
 // Recovered reports whether the structural tree was parsed from a
 // range-preserving recovery view rather than the exact source bytes. The
 // original source remains in Source and must be used for all editor ranges.
 func (d *Document) Recovered() bool {
-	return !bytes.Equal(d.Source, d.treeSource)
+	return !bytes.Equal(d.Source, d.treeSource) || !d.Complete()
+}
+
+// Complete reports whether the current CST accepted the whole source without
+// hidden root errors or a partial-parser stop. It is intentionally stricter
+// than checking named ERROR nodes; a no_stacks_alive prefix can otherwise look
+// clean to a tree walk.
+func (d *Document) Complete() bool {
+	if d == nil || d.Tree == nil || d.Tree.RootNode() == nil {
+		return false
+	}
+	root := d.Tree.RootNode()
+	return !root.HasError() && d.Tree.ParseStopReason() == gotreesitter.ParseStopAccepted && int(root.EndByte()) >= len(d.Source)
+}
+
+// Health returns a stable, editor-facing parse status for telemetry, corpus
+// reports, and clients that want to distinguish exact syntax from recovery.
+func (d *Document) Health() ParseHealth {
+	if d == nil || d.Tree == nil || d.Tree.RootNode() == nil {
+		sourceBytes := 0
+		if d != nil {
+			sourceBytes = len(d.Source)
+		}
+		return ParseHealth{Recovered: true, Stopped: true, StopReason: "nil-tree", SourceBytes: sourceBytes}
+	}
+	root := d.Tree.RootNode()
+	stop := d.Tree.ParseStopReason()
+	return ParseHealth{
+		Complete:     d.Complete(),
+		Recovered:    d.Recovered(),
+		RootHasError: root.HasError(),
+		Stopped:      stop != gotreesitter.ParseStopAccepted,
+		StopReason:   string(stop),
+		EndByte:      root.EndByte(),
+		SourceBytes:  len(d.Source),
+	}
 }
 
 // Offset converts an LSP UTF-16 position to a UTF-8 byte offset.
@@ -206,9 +255,27 @@ func Parse(source []byte) (*Document, error) {
 func (d *Document) Diagnostics() []Diagnostic {
 	out := make([]Diagnostic, 0)
 	collectInnermostErrors(d.Tree.RootNode(), &out)
+	// A parser can stop without materializing a named ERROR node. Report that
+	// condition explicitly so LSP clients never mistake a truncated structural
+	// tree for a clean document. Recovery candidates that cover the full source
+	// and have accepted stop metadata do not reach this branch.
+	if len(out) == 0 && !d.Complete() {
+		root := d.Tree.RootNode()
+		end := root.EndPoint()
+		message := "Bend parser did not accept the complete source"
+		if reason := d.Tree.ParseStopReason(); reason != gotreesitter.ParseStopAccepted {
+			message = fmt.Sprintf("Bend parser stopped before the end of the source (%s); structural features may be partial", reason)
+		} else if root.HasError() {
+			message = "Bend parser returned a structural error tree; structural features may be partial"
+		}
+		out = append(out, Diagnostic{Message: message, Range: Range{Start: Position{end.Row, end.Column}, End: Position{end.Row, end.Column}}, Severity: 2, Source: "bend-parser"})
+	}
 	seenLines := make(map[uint32]bool, len(out))
 	for _, diagnostic := range out {
 		seenLines[diagnostic.Range.Start.Line] = true
+	}
+	if len(out) == 0 {
+		return out
 	}
 	for _, line := range missingDefinitionLines(d.Source, d.Tree.RootNode(), d.language) {
 		if seenLines[line] {

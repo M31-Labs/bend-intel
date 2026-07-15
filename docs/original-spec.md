@@ -1,51 +1,67 @@
 # Original-spec execution note
 
-This repository is the implementation of the referenced ChatGPT conversation, “Bend Language LSP Feasibility.” That charter called for two cooperating projects:
+This repository implements the charter from the referenced **Bend Language LSP
+Feasibility** conversation. The charter called for two cooperating projects:
 
-1. A reusable pure-Go Bend grammar package (`gotreesitter-bend` in the proposal).
-2. A reusable Bend intelligence engine with an LSP executable (`bend-intel` and `bendls`).
+1. a reusable pure-Go Bend grammar/runtime package (`gotreesitter-bend` in the
+   proposal); and
+2. a reusable Bend intelligence engine with an LSP executable (`bend-intel`
+   and `bendls`).
 
-The present M31 Labs repository keeps those as packages in one transfer-ready repository so the work can be maintained independently and moved upstream later without first splitting history.
+M31 Labs keeps those layers in one public MIT repository so the work can be
+   maintained independently and transferred upstream later without first
+   splitting history.
 
-## Acceptance status
+## Requirement matrix
 
-The initial package acceptance gates are complete and reproducible: generated
-grammar/scanner artifacts, C-vs-Go witness coverage, incremental edits,
-queries, recovery diagnostics, workspace navigation, LSP synchronization,
-fuzz/benchmark/WASM checks, and the optional semantic boundary all have tests
-or executable checks. This does not mean the full proposal's later compiler
-backend and Bend-native visualization phases are complete. The archived
-grammar also leaves five current examples as explicit functional-syntax gaps;
-see the compatibility snapshot rather than treating those files as silently
-accepted.
-
-| Original-spec requirement | Current implementation |
+| Original-spec requirement | Status and evidence |
 |---|---|
-| Import existing `grammar.json`/parser tables | Vendored `bendlang/grammar/grammar.json`, generated `bendlang/grammar/bend.bin`, and `tools/generate-bend-grammar.sh` |
-| Faithful stateful external scanner | `bendlang/scanner.go`, including indentation serialization and slash-terminated paths |
-| No CGo for consumers | `bendlang` and `bendls` build as pure Go |
-| Incremental editor document store | UTF-16 edits call `Tree.Edit` and `ParseIncremental` |
-| Syntax-first author experience | Diagnostics, symbols, folds, selection ranges, hover, definitions, references, semantic tokens |
-| Workspace intelligence | `.bend` discovery, resolved import graph, workspace symbols, visible completions, cross-file references, rename |
-| Bend remains semantic authority | No type checker is duplicated; `intel.SemanticBackend` is an optional compiler boundary |
-| Query substrate | Highlight, locals, tags, folds, and indent queries compile against the generated language |
-| Correctness gates | C-vs-Go witness, incremental edit tests, fuzz target, benchmarks, opt-in parity script, and WASM smoke build |
-| Current-language honesty | The archived grammar baseline is documented in `docs/compatibility.md` rather than silently accepting recovery trees |
-| Distinctive Bend tooling | The next layer is reserved for compiler-backed pattern coverage, HVM lowering, and parallel-structure views |
+| Import existing `grammar.json` and generated tables | Complete: `bendlang/grammar/grammar.json`, embedded `bend.bin`, source grammar, and `tools/generate-bend-grammar.sh` |
+| Faithful stateful external scanner | Complete at the language boundary: Go port covers indentation serialization, comments, natural literals, and paths; scanner tests cover round trips and edits |
+| No CGo for consumers | Complete: normal `bendlang`, `bend-intel`, and `bendls` builds are pure Go |
+| Current Bend compatibility fixtures | Complete for all 16 current examples: raw Go acceptance 16/16, structural completion 16/16, diagnostics-free 16/16, and C/Go witness parity 16/16 |
+| Incremental editor document store | Complete: UTF-16 edits call `Tree.Edit`/`ParseIncremental`, then select fresh recovery candidates when needed |
+| Syntax-first author experience | Complete: diagnostics, explicit parse health, symbols, folds, selection ranges, hover, semantic tokens, definitions, references, rename, completion |
+| Scope-aware Bend bindings | Complete as a structural model: parameters, lambdas, assignment/pattern bindings, match/switch/fold/bend scopes; compiler imports and unscoped semantics remain authoritative |
+| Workspace intelligence | Complete as a syntax index: file discovery, import graph, workspace symbols, cross-file navigation/references/rename, contextual completion |
+| Call hierarchy | Complete as a conservative syntax-derived LSP feature; overloads and higher-order resolution remain compiler questions |
+| Bend remains semantic authority | Complete by design: no Go type checker or HVM evaluator is duplicated |
+| Query substrate | Complete: highlights, locals, tags, folds, and indents are vendored and compiled against the generated language |
+| Correctness gates | Complete and reproducible: unit/race/vet, scanner corpus, incremental edits, fuzz target, benchmarks, C witness, and WASM smoke |
+| Compiler diagnostics and inferred types | Complete as an optional protocol and reference `semanticd`; LSP drops stale versions and works without the sidecar |
+| Signature help and semantic hover | Complete when the backend supplies signatures/types; structural hover remains the fallback |
+| Pattern coverage | Implemented conservatively in `intel.PatternCoverage` for duplicate/wildcard structural findings; exhaustive constructor coverage remains compiler-owned and is reported as such |
+| Parallel-structure view | Implemented conservatively in `intel.ParallelStructure`; it reports explicit branch containers and never predicts scheduling or speedups |
+| HVM lowering view | Complete when the optional sidecar is configured: `bend/hvmView` requests compiler-generated HVM; structural CST remains the explicit fallback |
+| Binding visualization | Implemented through `bend/bindingInfo` and the `BindingInfo` model; exact unscoped-variable explanations remain compiler-owned |
+| Full raw C/Go tree parity | Complete for the current examples: 16/16 raw Go trees accepted and 16/16 exact C/Go witness trees; the strict validation gate is green |
+| Full performance/editor benchmark matrix | Complete baseline in [`docs/performance.md`](performance.md): full/incremental parse measurements plus the strict end-to-end editor-path gate; absolute budgets remain hardware-specific |
 
-## Deliberate boundaries
+## Recovery and authority boundaries
 
-The grammar package does not own type checking, import semantics, runtime performance claims, or HVM execution. The intelligence engine may use syntax facts while a document is incomplete or the compiler is unavailable. Compiler diagnostics, inferred types, signatures, and pattern coverage should arrive through a stable Bend-side JSON or semantic-daemon protocol instead of reimplementing Bend's Rust semantics in Go.
+gotreesitter can intentionally return partial trees for editor workloads. This
+project therefore distinguishes:
 
-The syntax-first layer also has a narrow, range-preserving recovery view for
-current typed `def`/`type` headers and a few lexical constructs that the
-archived grammar cannot yet model. It uses a fresh parser for every candidate,
-preserves the original byte offsets, and exposes `Document.Recovered()` so
-consumers can distinguish a structural view from an exact parse. It never
-claims to validate the type or replace Bend's parser/type checker. A lexical
-top-level outline fallback keeps definitions visible when parser recovery
-stops before a later functional definition.
+- **raw parser health:** stop reason, root error metadata, and covered bytes;
+- **structural recovery:** a fresh range-preserving candidate marked
+  `Recovered()`; and
+- **compiler semantics:** Bend diagnostics, types, imports, lowering, and
+  runtime claims.
+
+The recovery layer never rewrites `Document.Source`. It exists so symbols,
+navigation, and completion remain useful while the user types or while a
+grammar/runtime mismatch is being resolved. See
+[`docs/gotreesitter-findings.md`](gotreesitter-findings.md) for the silent
+`no_stacks_alive` fixture and the C/Go witness policy.
 
 ## Maintainer handoff
 
-The repository is MIT licensed, uses the `github.com/M31-Labs/bend-intel` module path, and is intended to be public under M31 Labs. The archived grammar commit and regeneration workflow are recorded in `bendlang/grammar/UPSTREAM.md`.
+The repository is public under M31 Labs, MIT licensed, and transfer-ready. The
+grammar provenance, Bend compiler pin, generated hashes, and regeneration steps
+are in [`bendlang/grammar/UPSTREAM.md`](../bendlang/grammar/UPSTREAM.md).
+
+The initial packages are useful and the strict roadmap validation passes for
+the current Bend examples. The compiler-backed lowering view is available
+through the optional sidecar; syntax recovery, negative fixtures, and compiler
+semantics remain explicitly separated rather than being presented as false
+parser acceptance.

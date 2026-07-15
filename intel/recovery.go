@@ -24,12 +24,30 @@ func parseWithRecovery(parser *gotreesitter.Parser, lang *gotreesitter.Language,
 func chooseRecoveredTree(parser *gotreesitter.Parser, lang *gotreesitter.Language, original, parsedSource []byte, tree *gotreesitter.Tree) (*gotreesitter.Tree, []byte, error) {
 	bestTree, bestSource := tree, parsedSource
 	bestErrors, bestMissing := recoveryScore(original, tree, lang)
-	if bestErrors == 0 && bestMissing == 0 {
+	// A clean CST is already the strongest result. Do not replace it with a
+	// masked compatibility tree merely because the heuristic outline pass did
+	// not recognize a newer top-level spelling; that would report recovery for
+	// valid current Bend and discard compiler-faithful structure.
+	if bestErrors == 0 {
 		return bestTree, bestSource, nil
 	}
 	masked, changed := maskCurrentSyntax(original)
 	if changed && !bytes.Equal(masked, parsedSource) {
 		bestTree, bestSource, bestErrors, bestMissing = chooseCandidate(parser, lang, original, masked, bestTree, bestSource, bestErrors, bestMissing)
+	}
+	// A path token can be valid in a pattern and still cause the pure-Go GLR
+	// runtime to abandon an expression-level stack (for example
+	// `return List/Nil`). Mask only the separator, preserving every byte range
+	// while allowing the ordinary identifier DFA to carry the structural tree.
+	pathsMasked := maskCurrentPathSeparators(original)
+	if !bytes.Equal(pathsMasked, original) {
+		bestTree, bestSource, bestErrors, bestMissing = chooseCandidate(parser, lang, original, pathsMasked, bestTree, bestSource, bestErrors, bestMissing)
+	}
+	if changed {
+		pathsAfterSyntax := maskCurrentPathSeparators(masked)
+		if !bytes.Equal(pathsAfterSyntax, masked) {
+			bestTree, bestSource, bestErrors, bestMissing = chooseCandidate(parser, lang, original, pathsAfterSyntax, bestTree, bestSource, bestErrors, bestMissing)
+		}
 	}
 	if bestMissing > 0 {
 		constructorMasked := maskCurrentConstructorReturns(masked)
@@ -47,7 +65,114 @@ func chooseRecoveredTree(parser *gotreesitter.Parser, lang *gotreesitter.Languag
 			bestTree, bestSource, bestErrors, bestMissing = chooseCandidate(parser, lang, original, commentsMasked, bestTree, bestSource, bestErrors, bestMissing)
 		}
 	}
+	// A few large, path-heavy imperative bodies can exhaust the GLR survivor
+	// set before the next top-level definition. As a final editor-only
+	// fallback, keep each definition header and replace its body with one
+	// range-preserving `return 0` placeholder. This is considered only after a
+	// stopped/truncated parse, is marked as recovered, and never competes with
+	// an accepted exact tree. It gives symbols, scopes and navigation a complete
+	// document while Bend remains authoritative for the hidden body semantics.
+	if needsBodyResync(bestTree, len(original)) {
+		bodyMasked := maskCurrentDefinitionBodies(masked)
+		if !bytes.Equal(bodyMasked, masked) {
+			bestTree, bestSource, bestErrors, bestMissing = chooseCandidate(parser, lang, original, bodyMasked, bestTree, bestSource, bestErrors, bestMissing)
+		}
+	}
 	return bestTree, bestSource, nil
+}
+
+func needsBodyResync(tree *gotreesitter.Tree, sourceLen int) bool {
+	if tree == nil || tree.RootNode() == nil {
+		return true
+	}
+	return tree.RootNode().HasError() || tree.ParseStopReason() != gotreesitter.ParseStopAccepted || int(tree.RootNode().EndByte()) < sourceLen
+}
+
+// maskCurrentDefinitionBodies preserves top-level imperative definition
+// headers and source offsets while replacing bodies that are too ambiguous for
+// a stopped editor parse. It is deliberately conservative: functional
+// equation rules (which use `=` rather than a colon body) are left untouched.
+func maskCurrentDefinitionBodies(source []byte) []byte {
+	lines := bytes.SplitAfter(source, []byte{'\n'})
+	starts := make([]int, 0)
+	for i, line := range lines {
+		if topLevelDefinitionLine(line) {
+			starts = append(starts, i)
+		}
+	}
+	masked := append([]byte(nil), source...)
+	offsets := make([]int, len(lines)+1)
+	for i, line := range lines {
+		offsets[i+1] = offsets[i] + len(line)
+	}
+	for si, start := range starts {
+		line := trimLineEnding(lines[start])
+		if !wordAt(line, 0, "def") || bytes.Contains(line, []byte{'='}) || !bytes.Contains(line, []byte{':'}) {
+			continue
+		}
+		end := len(lines)
+		if si+1 < len(starts) {
+			end = starts[si+1]
+		}
+		firstBody := -1
+		for i := start + 1; i < end; i++ {
+			body := trimLineEnding(lines[i])
+			if len(bytes.TrimSpace(body)) == 0 || bytes.HasPrefix(bytes.TrimSpace(body), []byte{'#'}) {
+				continue
+			}
+			firstBody = i
+			break
+		}
+		if firstBody < 0 {
+			continue
+		}
+		for i := start + 1; i < end; i++ {
+			line := lines[i]
+			limit := len(trimLineEnding(line))
+			if limit == 0 {
+				continue
+			}
+			for j := 0; j < limit; j++ {
+				masked[offsets[i]+j] = ' '
+			}
+			if i != firstBody {
+				continue
+			}
+			indent := 0
+			for indent < limit && (line[indent] == ' ' || line[indent] == '\t') {
+				indent++
+			}
+			placeholder := []byte("return 0")
+			if limit-indent < len(placeholder) {
+				placeholder = []byte("0")
+			}
+			copy(masked[offsets[i]+indent:], placeholder)
+		}
+	}
+	return masked
+}
+
+func trimLineEnding(line []byte) []byte {
+	if len(line) > 0 && line[len(line)-1] == '\n' {
+		line = line[:len(line)-1]
+	}
+	if len(line) > 0 && line[len(line)-1] == '\r' {
+		line = line[:len(line)-1]
+	}
+	return line
+}
+
+func topLevelDefinitionLine(line []byte) bool {
+	line = trimLineEnding(line)
+	if len(line) == 0 || line[0] == ' ' || line[0] == '\t' || line[0] == '#' {
+		return false
+	}
+	for _, keyword := range []string{"def", "type", "object", "hvm", "import", "from", "unchecked", "const"} {
+		if wordAt(line, 0, keyword) {
+			return true
+		}
+	}
+	return topLevelEquals(line) >= 0
 }
 
 // maskCurrentSyntax applies only range-preserving lexical shims for syntax
@@ -174,7 +299,17 @@ func parseIncrementalWithRecovery(parser *gotreesitter.Parser, lang *gotreesitte
 }
 
 func recoveryScore(source []byte, tree *gotreesitter.Tree, lang *gotreesitter.Language) (int, int) {
-	return errorCount(tree.RootNode()), len(missingDefinitionLines(source, tree.RootNode(), lang))
+	if tree == nil || tree.RootNode() == nil {
+		return 1, 0
+	}
+	errors := errorCount(tree.RootNode())
+	// HasError also covers a parser failure materialized only in the root
+	// compatibility metadata. ParseStopReason catches the more dangerous
+	// silent-prefix case where no named ERROR node was materialized at all.
+	if tree.RootNode().HasError() || tree.ParseStopReason() != gotreesitter.ParseStopAccepted || int(tree.RootNode().EndByte()) < len(source) {
+		errors++
+	}
+	return errors, len(missingDefinitionLines(source, tree.RootNode(), lang))
 }
 
 func missingDefinitionLines(source []byte, root *gotreesitter.Node, lang *gotreesitter.Language) []uint32 {
@@ -345,6 +480,43 @@ func maskCurrentComments(source []byte) []byte {
 		lineStart = lineEnd + 1
 	}
 	return masked
+}
+
+func maskCurrentPathSeparators(source []byte) []byte {
+	masked := append([]byte(nil), source...)
+	var quote byte
+	for i := 0; i < len(source); i++ {
+		c := source[i]
+		if quote != 0 {
+			if c == '\\' {
+				i++
+				continue
+			}
+			if c == quote {
+				quote = 0
+			}
+			continue
+		}
+		if c == '"' || c == '\'' {
+			quote = c
+			continue
+		}
+		if c == '#' {
+			for i < len(source) && source[i] != '\n' {
+				i++
+			}
+			continue
+		}
+		if c != '/' || i == 0 || i+1 >= len(source) || !isPathWordByte(source[i-1]) || !isPathWordByte(source[i+1]) {
+			continue
+		}
+		masked[i] = '_'
+	}
+	return masked
+}
+
+func isPathWordByte(b byte) bool {
+	return b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' || b == '_' || b == '.' || b == '-'
 }
 
 func isExpressionByte(b byte) bool {
