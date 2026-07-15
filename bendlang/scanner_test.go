@@ -13,3 +13,9 @@ func TestScannerSerializationRoundTrip(t *testing.T) {
 		t.Fatalf("restored indents = %v", restored.indents)
 	}
 }
+
+func TestHighlightsQueryCompiles(t *testing.T) {
+	if _, err := Highlights(); err != nil {
+		t.Fatal(err)
+	}
+}

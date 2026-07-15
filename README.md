@@ -15,9 +15,23 @@ The Bend compiler remains authoritative for language semantics. This project own
 ```sh
 go run ./cmd/bend-intel outline example.bend
 go run ./cmd/bend-intel check example.bend
+go run ./cmd/bendls
 ```
 
 `check` exits non-zero when Tree-sitter reports syntax errors. `outline` emits stable JSON suitable for editor and agent integrations.
+
+`bendls` is a stdio LSP server with incremental UTF-16 document sync, immediate syntax diagnostics, document symbols, folding ranges, hover, same-file definitions, and references. A minimal Neovim setup is:
+
+```lua
+vim.api.nvim_create_autocmd("FileType", {
+  pattern = "bend",
+  callback = function()
+    vim.lsp.start({ name = "bendls", cmd = { "/path/to/bendls" } })
+  end,
+})
+```
+
+Build both commands with `go build ./cmd/bend-intel ./cmd/bendls`.
 
 ## Development
 

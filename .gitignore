@@ -1,3 +1,4 @@
 /bend-intel
 *.exe
 *.test
+.canopy/

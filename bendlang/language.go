@@ -26,6 +26,18 @@ var language = sync.OnceValues(func() (*gotreesitter.Language, error) {
 	return lang, nil
 })
 
+var highlightQuery = sync.OnceValues(func() (*gotreesitter.Query, error) {
+	lang, err := Language()
+	if err != nil {
+		return nil, err
+	}
+	query, err := gotreesitter.NewQuery(highlights, lang)
+	if err != nil {
+		return nil, fmt.Errorf("compile Bend highlights query: %w", err)
+	}
+	return query, nil
+})
+
 // Language returns the immutable Bend language definition.
 func Language() (*gotreesitter.Language, error) { return language() }
 
@@ -40,3 +52,6 @@ func NewParser() (*gotreesitter.Parser, error) {
 
 // HighlightsQuery returns the upstream-compatible syntax highlighting query.
 func HighlightsQuery() string { return highlights }
+
+// Highlights returns the compiled Bend highlight query.
+func Highlights() (*gotreesitter.Query, error) { return highlightQuery() }
